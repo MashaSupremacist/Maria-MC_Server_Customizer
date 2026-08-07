@@ -598,6 +598,38 @@ Phases 12 and 13 were combined into a single flavor abstraction because Fabric, 
 
 ---
 
+## Git and GitHub Publishing
+
+**Status:** Local repo ready; publishing in progress (via GitHub Desktop).
+
+### Local repository
+
+- The project now lives in its **own git repository** at `C:\GitHub Repos\Minecraft Server Customizer` (previously the folder sat inside a larger umbrella repo that was never committed).
+- Branch: `main` (renamed from `master` to match GitHub's default).
+- Commits:
+  1. `4b7615e` — Initial commit: Phases 1–14 source
+  2. `6c5bf1b` — Ignore umbrella-repo leftover files
+  3. `e457340` — Phase 15: packaging, installer, portable ZIP, CI release workflow
+- `.gitignore` excludes `node_modules/`, `dist/`, `release/`, `data/`, `apps/desktop/resources/bin/` (bundled node staged at build time), and local scratch files.
+- No remotes configured yet.
+
+### Publishing steps (GitHub Desktop)
+
+1. Add the local repo (`File → Add Local Repository` → the project folder).
+2. **Publish repository** — creates the GitHub repo and pushes `main`.
+3. Tag the top commit `v0.1.0` and push the tag — the GitHub Actions workflow builds fresh installer/portable/checksums and attaches them to a GitHub Release.
+
+### What appears on GitHub
+
+- **Source repo**: source code only — no exe files (the `release/` folder is gitignored). Artifacts are attached under **Releases → v0.1.0 → Assets** by CI:
+  - `Minecraft Server Customizer-Setup-0.1.0.exe`
+  - `Minecraft Server Customizer-Portable-0.1.0.exe` (CI-only artifact; the portable target)
+  - `Minecraft Server Customizer-Portable-0.1.0.zip`
+  - `SHA256SUMS.txt`
+- The in-app update banner reads the GitHub Releases API, so `v0.1.0` becomes the baseline for future update notifications.
+
+---
+
 # MVP Definition (from plan §27)
 
 The Vanilla MVP is complete: a Windows user can install the app, create/import Vanilla servers, import worlds, install/select Java, run the server with live console + commands, edit settings and gamerules, manage players, back up and restore, and launch Playit. Fabric, Forge, Paper, and Bedrock support are also implemented and packaged.
