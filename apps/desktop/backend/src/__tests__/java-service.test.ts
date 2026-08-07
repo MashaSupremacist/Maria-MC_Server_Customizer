@@ -56,6 +56,13 @@ process.stderr.write('OpenJDK Runtime Environment (build 21.0.1+12)\\n');
 process.exit(0);
 `;
 
+/** A fake Java 8 runtime: prints the legacy 1.8 version string. */
+const FAKE_JAVA_8 = `
+process.stderr.write('java version "1.8.0_421"\\n');
+process.stderr.write('Java(TM) SE Runtime Environment (build 1.8.0_421-b09)\\n');
+process.exit(0);
+`;
+
 describe('requiredJavaForMinecraft', () => {
   it('maps versions to the right Java feature version', () => {
     expect(requiredJavaForMinecraft('1.21.4')).toBe(21);
@@ -66,6 +73,11 @@ describe('requiredJavaForMinecraft', () => {
     expect(requiredJavaForMinecraft('1.17.1')).toBe(16);
     expect(requiredJavaForMinecraft('1.16.5')).toBe(8);
     expect(requiredJavaForMinecraft('1.12.2')).toBe(8);
+    // Old versions — including the 1.7.10 era — run on Java 8.
+    expect(requiredJavaForMinecraft('1.7.10')).toBe(8);
+    expect(requiredJavaForMinecraft('1.8.9')).toBe(8);
+    expect(requiredJavaForMinecraft('1.6.4')).toBe(8);
+    expect(requiredJavaForMinecraft('1.2.5')).toBe(8);
     // New-style year-based versions (25+) require Java 25.
     expect(requiredJavaForMinecraft('26.2')).toBe(25);
     expect(requiredJavaForMinecraft('25.1')).toBe(25);
@@ -108,6 +120,29 @@ describe('JavaService', () => {
     expect(detected).not.toBeNull();
     expect(detected?.majorVersion).toBe(21);
     expect(detected?.version).toContain('21.0.1');
+  });
+
+  it('detects Java 8 from its legacy 1.8 version string', async () => {
+    const { java } = await setup();
+    // Java 8 reports "java version 1.8.0_421" — the major is 8, not 1.
+    fs.writeFileSync(path.join(tempDir, 'fake-java-8.js'), FAKE_JAVA_8);
+    const fakeJava8Path = path.join(tempDir, 'fake-java-8.cmd');
+    fs.writeFileSync(fakeJava8Path, `@echo off\r\nnode "%~dp0fake-java-8.js"\r\n`);
+    const detected = await java.detect(fakeJava8Path);
+    expect(detected).not.toBeNull();
+    expect(detected?.majorVersion).toBe(8);
+    expect(detected?.version).toContain('1.8.0');
+  });
+
+  it('reports a compatible requirement for java 8 + MC 1.16', async () => {
+    const { java } = await setup();
+    fs.writeFileSync(path.join(tempDir, 'fake-java-8.js'), FAKE_JAVA_8);
+    const fakeJava8Path = path.join(tempDir, 'fake-java-8.cmd');
+    fs.writeFileSync(fakeJava8Path, `@echo off\r\nnode "%~dp0fake-java-8.js"\r\n`);
+    const req = await java.getRequirement('1.16.5', fakeJava8Path);
+    expect(req.requiredJava).toBe(8);
+    expect(req.compatible).toBe(true);
+    expect(req.detected?.majorVersion).toBe(8);
   });
 
   it('reports a compatible requirement for java 21 + MC 1.21', async () => {

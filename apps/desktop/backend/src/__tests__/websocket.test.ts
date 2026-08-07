@@ -37,6 +37,7 @@ process.on('SIGTERM', () => process.exit(0));
       `@echo off\r\nnode "%~dp0fake-server.js" %*\r\n`,
     );
     fs.writeFileSync(path.join(serverDir, 'server.jar'), 'fake');
+    fs.writeFileSync(path.join(serverDir, 'eula.txt'), 'eula=true\n');
 
     const created = await app.inject({
       method: 'POST',

@@ -112,6 +112,47 @@ export class ServerInstallerService {
   }
 
   /**
+   * Download a loader's server jar into an existing server folder (used by
+   * "create from pack" when a pack declares forge/fabric but ships no server
+   * jar or installer). Downloads the flavor's artifacts, runs the install
+   * step (Forge --installServer), and writes eula.txt.
+   */
+  async bootstrapServerJar(request: {
+    flavor: ServerFlavor;
+    version: string;
+    serverFolder: string;
+    javaPath?: string | null;
+  }): Promise<void> {
+    const resolver = this.resolvers[request.flavor];
+    if (!resolver) throw new Error(`Unknown server type: ${request.flavor}`);
+    if (!(await resolver.supports(request.version))) {
+      throw new Error(`No ${request.flavor} server available for Minecraft ${request.version}`);
+    }
+    const downloads = await resolver.resolveDownloads({ version: request.version });
+    for (const download of downloads) {
+      const dest = path.join(request.serverFolder, download.fileName);
+      await this.downloadFile(download.url, dest, () => undefined, () => false);
+      if (download.sha1) {
+        const sha1 = await sha1File(dest);
+        if (sha1 !== download.sha1) {
+          throw new Error(`Download checksum mismatch for ${download.fileName}`);
+        }
+      }
+    }
+    if (resolver.installStep) {
+      await resolver.installStep({
+        version: request.version,
+        serverFolder: request.serverFolder,
+        javaPath: request.javaPath ?? null,
+      });
+    }
+    fs.writeFileSync(
+      path.join(request.serverFolder, 'eula.txt'),
+      `#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA).\n#${new Date().toISOString()}\neula=true\n`,
+    );
+  }
+
+  /**
    * Convert an existing server to a new flavor in place: swap the server jar
    * (and run the Forge installer step when needed). The world folder and
    * config are preserved. Only works while the server is offline.

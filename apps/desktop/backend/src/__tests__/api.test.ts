@@ -126,6 +126,50 @@ describe('backend API', () => {
       expect(res.statusCode).toBe(400);
     });
 
+    it('writes eula.txt and stores the version when acceptEula is true', async () => {
+      const serverFolder = path.join(dataDir, 'eula-server');
+      fs.mkdirSync(serverFolder, { recursive: true });
+      fs.writeFileSync(path.join(serverFolder, 'server.jar'), 'x');
+
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers',
+        headers: authHeaders,
+        payload: {
+          name: 'EULA Server',
+          edition: 'java',
+          serverType: 'vanilla',
+          folderPath: serverFolder,
+          version: '1.7.10',
+          acceptEula: true,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().version).toBe('1.7.10');
+      const eula = fs.readFileSync(path.join(serverFolder, 'eula.txt'), 'utf8');
+      expect(eula).toContain('eula=true');
+    });
+
+    it('does not write eula.txt when acceptEula is false', async () => {
+      const serverFolder = path.join(dataDir, 'no-eula-server');
+      fs.mkdirSync(serverFolder, { recursive: true });
+      fs.writeFileSync(path.join(serverFolder, 'server.jar'), 'x');
+
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers',
+        headers: authHeaders,
+        payload: {
+          name: 'No EULA Server',
+          edition: 'java',
+          serverType: 'vanilla',
+          folderPath: serverFolder,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(fs.existsSync(path.join(serverFolder, 'eula.txt'))).toBe(false);
+    });
+
     it('returns 404 for updating a missing server', async () => {
       const res = await getApp().inject({
         method: 'PUT',
@@ -163,6 +207,27 @@ describe('backend API', () => {
         path: serverDir,
         edition: 'java',
         serverType: 'vanilla',
+        version: null,
+      });
+    });
+
+    it('sniffs the version from a forge jar name', async () => {
+      const serverDir = path.join(dataDir, 'detect-forge');
+      fs.mkdirSync(serverDir, { recursive: true });
+      fs.writeFileSync(path.join(serverDir, 'forge-1.7.10-10.13.4.1614-1.7.10-universal.jar'), 'x');
+
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers/detect',
+        headers: authHeaders,
+        payload: { folderPath: serverDir },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        path: serverDir,
+        edition: 'java',
+        serverType: 'forge',
+        version: '1.7.10',
       });
     });
 
@@ -182,6 +247,7 @@ describe('backend API', () => {
         path: serverDir,
         edition: 'bedrock',
         serverType: 'bedrock',
+        version: null,
       });
     });
 
@@ -196,7 +262,12 @@ describe('backend API', () => {
         payload: { folderPath: dir },
       });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ path: dir, edition: null, serverType: null });
+      expect(res.json()).toEqual({
+        path: dir,
+        edition: null,
+        serverType: null,
+        version: null,
+      });
     });
 
     it('rejects a missing folderPath', async () => {

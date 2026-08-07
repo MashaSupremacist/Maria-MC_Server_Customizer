@@ -95,6 +95,8 @@ export const IpcChannels = {
   deleteExtension: 'extensions:delete',
   selectModpack: 'modpack:select',
   importModpack: 'modpack:import',
+  inspectPack: 'pack:inspect',
+  createServerFromPack: 'pack:create-from-pack',
   getBedrockVersions: 'bedrock:versions',
   installBedrockServer: 'bedrock:install',
   cancelBedrockInstall: 'bedrock:install:cancel',
@@ -174,6 +176,12 @@ export interface CreateServerInput {
   port?: number;
   version?: string | null;
   jvmArgs?: string[];
+  /**
+   * When true, writes an accepted eula.txt into the folder. Existing server
+   * folders (e.g. an old Forge pack) may not have one; without it the server
+   * refuses to start.
+   */
+  acceptEula?: boolean;
 }
 
 /** Result of detecting whether a folder contains an existing Minecraft server. */
@@ -184,6 +192,11 @@ export interface DetectedServerInfo {
   edition: ServerEdition | null;
   /** Server type (vanilla/fabric/forge/paper/bedrock), when a server was found. */
   serverType: string | null;
+  /**
+   * Minecraft version sniffed from the server jar name, when readable
+   * (e.g. "1.7.10" from forge-1.7.10-...-universal.jar). Null otherwise.
+   */
+  version: string | null;
 }
 
 export interface UpdateServerInput {
@@ -349,6 +362,65 @@ export interface ModpackImportResult {
   skipped: number;
 }
 
+/** What a server-pack zip contains, sniffed by the backend. */
+export interface PackInspection {
+  ok: boolean;
+  error?: string;
+  /** Pack name from manifest/index, or the zip file name. */
+  name: string;
+  /** Minecraft version the pack targets, when detectable. */
+  mcVersion: string | null;
+  /** Loader the pack needs: forge / fabric / null (vanilla/unknown). */
+  loader: 'forge' | 'fabric' | 'vanilla' | null;
+  /** True when the pack ships a runnable server jar. */
+  hasServerJar: boolean;
+  /** True when the pack ships a forge installer that needs --installServer. */
+  needsInstallStep: boolean;
+  /** Java feature version the pack's MC version requires (e.g. 8 for 1.7.10). */
+  requiredJava: number;
+  /** Human label for requiredJava, e.g. "Java 8". */
+  requiredJavaLabel: string;
+}
+
+/** Request to create a brand-new server by extracting a server pack. */
+export interface CreateFromPackRequest {
+  /** Absolute path to the .zip/.mrpack file. */
+  filePath: string;
+  name: string;
+  folderName?: string;
+  javaPath?: string | null;
+  memoryMb?: number;
+  port?: number;
+  acceptEula: boolean;
+  /**
+   * Optional manual loader override. When set, the pack is treated as this
+   * loader even if detection couldn't tell (e.g. a CurseForge zip with only
+   * a mods/ folder and no manifest.json). When omitted, detection decides.
+   */
+  flavorOverride?: 'forge' | 'fabric' | 'vanilla';
+  /**
+   * Optional Minecraft version override, used when the pack's version can't
+   * be detected but the user knows it (e.g. forcing a Forge bootstrap on a
+   * version-less CurseForge zip).
+   */
+  mcVersionOverride?: string;
+}
+
+/** Result of creating a server from a pack. */
+export interface CreateFromPackResult {
+  ok: boolean;
+  error?: string;
+  server?: ServerRecord;
+  /** Pack info detected at creation time. */
+  inspection?: PackInspection;
+  /** Number of mod JARs placed into mods/. */
+  modsAdded?: number;
+  /** Number of non-mod files extracted. */
+  filesCopied?: number;
+  /** Number of files skipped. */
+  skipped?: number;
+}
+
 /** Progress of a server installation. */
 export interface InstallProgress {
   status:
@@ -417,6 +489,7 @@ export interface StartServerError {
     | 'missing-java'
     | 'missing-jar'
     | 'missing-executable'
+    | 'missing-eula'
     | 'already-running'
     | 'another-server-running'
     | 'folder-not-found'

@@ -7,6 +7,8 @@ import type {
   CommandResult,
   ConvertServerRequest,
   CreateBackupRequest,
+  CreateFromPackRequest,
+  CreateFromPackResult,
   CreateServerInput,
   DetectedServerInfo,
   ExtensionListResponse,
@@ -24,6 +26,7 @@ import type {
   LogLine,
   ModpackImportRequest,
   ModpackImportResult,
+  PackInspection,
   PackKind,
   PackListResponse,
   PlayerListEntry,
@@ -65,6 +68,10 @@ export const api = {
     window.msc.createServer(input),
   detectServerFolder: (path: string): Promise<DetectedServerInfo> =>
     window.msc.detectServerFolder(path),
+  inspectPack: (filePath: string): Promise<PackInspection> =>
+    window.msc.inspectPack(filePath),
+  createServerFromPack: (request: CreateFromPackRequest): Promise<CreateFromPackResult> =>
+    window.msc.createServerFromPack(request),
   updateServer: (id: string, input: UpdateServerInput): Promise<ServerRecord> =>
     window.msc.updateServer(id, input),
   deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean }> =>

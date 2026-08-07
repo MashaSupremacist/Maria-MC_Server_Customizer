@@ -31,6 +31,9 @@ import {
   type LogLine,
   type ModpackImportRequest,
   type ModpackImportResult,
+  type CreateFromPackRequest,
+  type CreateFromPackResult,
+  type PackInspection,
   type PackKind,
   type PackListResponse,
   type PlayerListEntry,
@@ -756,6 +759,24 @@ function registerIpcHandlers(): void {
         `/servers/${encodeURIComponent(request.serverId)}/modpack-import`,
         { filePath: request.filePath, force: request.force },
       )) as ModpackImportResult;
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.inspectPack,
+    async (_event, filePath: string): Promise<PackInspection> => {
+      return (await backendFetch('POST', '/packs/inspect', { filePath })) as PackInspection;
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.createServerFromPack,
+    async (_event, request: CreateFromPackRequest): Promise<CreateFromPackResult> => {
+      return (await backendFetch(
+        'POST',
+        '/servers/from-pack',
+        request,
+      )) as CreateFromPackResult;
     },
   );
 

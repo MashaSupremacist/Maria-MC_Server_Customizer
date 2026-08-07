@@ -11,6 +11,8 @@ import {
   type BedrockVersion,
   type CommandResult,
   type CreateBackupRequest,
+  type CreateFromPackRequest,
+  type CreateFromPackResult,
   type CreateServerInput,
   type ConvertServerRequest,
   type ExtensionListResponse,
@@ -27,6 +29,7 @@ import {
   type JavaRequirement,
   type LogLine,
   type ModpackImportResult,
+  type PackInspection,
   type PackKind,
   type PackListResponse,
   type PlayerListEntry,
@@ -62,6 +65,7 @@ import { BedrockPropertiesService } from './bedrock-properties';
 import { BedrockPlayerService } from './bedrock-player-service';
 import { PackService } from './pack-service';
 import { ModpackService } from './modpack-service';
+import { PackInstallerService } from './pack-installer';
 
 const SERVER_CREATE_SCHEMA = {
   type: 'object',
@@ -76,6 +80,7 @@ const SERVER_CREATE_SCHEMA = {
     port: { type: 'integer', minimum: 1, maximum: 65535 },
     version: { type: ['string', 'null'] },
     jvmArgs: { type: 'array', items: { type: 'string' } },
+    acceptEula: { type: 'boolean' },
   },
 } as const;
 
@@ -335,6 +340,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const packService = new PackService(db, (id) => manager.runningServerId() === id);
   const modpackService = new ModpackService(db, broadcast);
   modpackService.setRunningServerId(() => manager.runningServerId());
+  const packInstaller = new PackInstallerService(db, broadcast, { installer });
 
   // Private runtimes live under the app data dir.
   const runtimesDir = path.join(dataDir, 'runtimes', 'java');
@@ -385,6 +391,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         path: request.body.folderPath,
         edition: detected ? detected.edition : null,
         serverType: detected ? detectedServerType(detected) : null,
+        version: detected ? detected.version : null,
       };
     },
   );
@@ -392,7 +399,20 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.post<{ Body: CreateServerInput }>(
     '/servers',
     { schema: { body: SERVER_CREATE_SCHEMA } },
-    async (request) => db.createServer(request.body),
+    async (request) => {
+      // Existing folders may lack an accepted EULA (e.g. an old Forge pack).
+      // Write it here when the user agrees so the server can actually start.
+      if (request.body.acceptEula && fs.existsSync(request.body.folderPath)) {
+        const eula = path.join(request.body.folderPath, 'eula.txt');
+        if (!fs.existsSync(eula)) {
+          fs.writeFileSync(
+            eula,
+            `#By changing the setting below to TRUE you are indicating your agreement to our EULA (https://aka.ms/MinecraftEULA).\n#${new Date().toISOString()}\neula=true\n`,
+          );
+        }
+      }
+      return db.createServer(request.body);
+    },
   );
 
   app.put<{ Params: { id: string }; Body: UpdateServerInput }>(
@@ -841,6 +861,22 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
         request.body.filePath ?? '',
         request.body.force ?? false,
       );
+    },
+  );
+
+  // Server-pack creation: "New Server from Pack" flow.
+  app.post<{ Body: { filePath: string } }>(
+    '/packs/inspect',
+    { schema: { body: { type: 'object', required: ['filePath'], properties: { filePath: { type: 'string', minLength: 1 } }, additionalProperties: false } } },
+    async (request): Promise<PackInspection> => {
+      return packInstaller.inspect(request.body.filePath);
+    },
+  );
+
+  app.post<{ Body: CreateFromPackRequest }>(
+    '/servers/from-pack',
+    async (request): Promise<CreateFromPackResult> => {
+      return packInstaller.create(request.body);
     },
   );
 

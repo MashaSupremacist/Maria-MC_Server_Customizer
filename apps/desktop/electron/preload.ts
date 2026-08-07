@@ -9,6 +9,8 @@ import type {
   BedrockVersion,
   CommandResult,
   CreateBackupRequest,
+  CreateFromPackRequest,
+  CreateFromPackResult,
   CreateServerInput,
   ConvertServerRequest,
   DetectedServerInfo,
@@ -27,6 +29,7 @@ import type {
   LogLine,
   ModpackImportRequest,
   ModpackImportResult,
+  PackInspection,
   PackKind,
   PackListResponse,
   PlayerListEntry,
@@ -127,6 +130,8 @@ const CHANNELS = {
   deleteExtension: 'extensions:delete',
   selectModpack: 'modpack:select',
   importModpack: 'modpack:import',
+  inspectPack: 'pack:inspect',
+  createServerFromPack: 'pack:create-from-pack',
   getBedrockVersions: 'bedrock:versions',
   installBedrockServer: 'bedrock:install',
   cancelBedrockInstall: 'bedrock:install:cancel',
@@ -172,6 +177,10 @@ const api = {
     ipcRenderer.invoke(CHANNELS.createServer, input),
   detectServerFolder: (path: string): Promise<DetectedServerInfo> =>
     ipcRenderer.invoke(CHANNELS.detectServerFolder, path),
+  inspectPack: (filePath: string): Promise<PackInspection> =>
+    ipcRenderer.invoke(CHANNELS.inspectPack, filePath),
+  createServerFromPack: (request: CreateFromPackRequest): Promise<CreateFromPackResult> =>
+    ipcRenderer.invoke(CHANNELS.createServerFromPack, request),
   updateServer: (id: string, input: UpdateServerInput): Promise<ServerRecord> =>
     ipcRenderer.invoke(CHANNELS.updateServer, id, input),
   deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean }> =>

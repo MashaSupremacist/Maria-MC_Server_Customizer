@@ -1,6 +1,6 @@
 {
   "name": "@msc/desktop",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Minecraft Server Customizer desktop application (Electron + React + Vite).",
   "main": "dist-electron/main.js",

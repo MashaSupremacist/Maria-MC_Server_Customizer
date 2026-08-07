@@ -174,6 +174,15 @@ export class ProcessManager {
         message: `Java executable not found: ${config.javaPath}`,
       };
     }
+    // Vanilla/Forge servers refuse to start without an accepted EULA; catch
+    // it here with a clear message instead of a cryptic crash.
+    if (edition === 'java' && !fs.existsSync(path.join(config.folderPath, 'eula.txt'))) {
+      return {
+        code: 'missing-eula',
+        message:
+          'This server folder has no eula.txt. Add it with "eula=true", or re-add the server and accept the EULA.',
+      };
+    }
 
     this.serverId = config.serverId;
     this.logs = [];

@@ -66,6 +66,10 @@ function writeFakeServer(): void {
   fs.writeFileSync(path.join(tempDir, 'fake-java.cmd'), FAKE_JAVA_CMD);
   fs.writeFileSync(path.join(tempDir, 'fake-server.js'), FAKE_SERVER_SCRIPT);
   fs.writeFileSync(path.join(tempDir, 'server.jar'), 'not a real jar');
+  // Most tests exercise process behavior, not the EULA gate; write it so the
+  // server is allowed to start. The missing-eula test creates the folder
+  // without it on purpose.
+  fs.writeFileSync(path.join(tempDir, 'eula.txt'), 'eula=true\n');
 }
 
 describe('findServerJar', () => {
@@ -165,6 +169,24 @@ describe('ProcessManager', () => {
       makeServerConfig({ javaPath: path.join(tempDir, 'missing-java.exe') }),
     );
     expect(err?.code).toBe('missing-java');
+  });
+
+  it('fails with missing-eula when there is no eula.txt', () => {
+    // Build the folder manually (writeFakeServer writes an eula.txt).
+    fs.writeFileSync(path.join(tempDir, 'fake-java.cmd'), FAKE_JAVA_CMD);
+    fs.writeFileSync(path.join(tempDir, 'fake-server.js'), FAKE_SERVER_SCRIPT);
+    fs.writeFileSync(path.join(tempDir, 'server.jar'), 'not a real jar');
+    const err = manager.start(makeServerConfig());
+    expect(err?.code).toBe('missing-eula');
+    expect(err?.message).toContain('eula.txt');
+  });
+
+  it('starts when eula.txt exists', async () => {
+    writeFakeServer();
+    const err = manager.start(makeServerConfig());
+    expect(err).toBeNull();
+    manager.stop();
+    await waitFor(() => manager.runningServerId === null, 5000);
   });
 
   it('sends commands via stdin', async () => {

@@ -30,6 +30,8 @@ export default function AddExistingServerForm({
   const [pickedPath, setPickedPath] = useState<string | null>(null);
   const [detected, setDetected] = useState<DetectedServerInfo | null>(null);
   const [name, setName] = useState('');
+  const [version, setVersion] = useState<string>('');
+  const [acceptEula, setAcceptEula] = useState(false);
   const [javaPath, setJavaPath] = useState<string | null>(initialJavaPath);
   const [memoryMb, setMemoryMb] = useState(1024);
   const [port, setPort] = useState(25565);
@@ -46,6 +48,8 @@ export default function AddExistingServerForm({
       const info = await api.detectServerFolder(result.path);
       setPickedPath(result.path);
       setDetected(info);
+      setVersion(info.version ?? '');
+      setAcceptEula(false);
       setJavaPath(null);
       setMemoryMb(1024);
       setPort(25565);
@@ -63,7 +67,12 @@ export default function AddExistingServerForm({
     }
   };
 
-  const canAdd = !!pickedPath && !!detected?.edition && name.trim().length > 0 && !saving;
+  const canAdd =
+    !!pickedPath &&
+    !!detected?.edition &&
+    name.trim().length > 0 &&
+    (detected.edition === 'bedrock' || acceptEula) &&
+    !saving;
 
   const addServer = async (): Promise<void> => {
     if (!pickedPath || !detected?.edition || !detected.serverType) return;
@@ -78,6 +87,8 @@ export default function AddExistingServerForm({
         javaPath: detected.edition === 'java' ? javaPath : null,
         memoryMb: detected.edition === 'java' ? memoryMb : undefined,
         port,
+        version: version.trim() || null,
+        acceptEula,
       });
       onCreated(record);
     } catch (err) {
@@ -160,6 +171,26 @@ export default function AddExistingServerForm({
           </div>
 
           {detected.edition === 'java' && (
+            <div className="form-row">
+              <label className="form-label" htmlFor="add-existing-version">
+                Minecraft version
+              </label>
+              <input
+                id="add-existing-version"
+                className="input"
+                value={version}
+                onChange={(e) => setVersion(e.target.value)}
+                placeholder="e.g. 1.7.10"
+                disabled={saving}
+              />
+              <p className="muted form-help">
+                Detected from the jar name when possible. Used to pick the
+                right Java runtime (e.g. 1.7.10 needs Java 8).
+              </p>
+            </div>
+          )}
+
+          {detected.edition === 'java' && (
             <>
               <div className="form-row">
                 <label className="form-label">Java executable</label>
@@ -209,6 +240,28 @@ export default function AddExistingServerForm({
               disabled={saving}
             />
           </div>
+
+          {detected.edition === 'java' && (
+            <div className="form-row">
+              <label className="form-label" htmlFor="add-existing-eula">
+                EULA
+              </label>
+              <label className="checkbox-label">
+                <input
+                  id="add-existing-eula"
+                  type="checkbox"
+                  checked={acceptEula}
+                  onChange={(e) => setAcceptEula(e.target.checked)}
+                  disabled={saving}
+                />
+                <span>
+                  I agree to the Minecraft End User License Agreement (EULA).
+                  This writes an <code>eula.txt</code> with <code>eula=true</code>{' '}
+                  into the server folder so it can start.
+                </span>
+              </label>
+            </div>
+          )}
 
           {error && <div className="error-banner">{error}</div>}
 

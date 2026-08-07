@@ -3,6 +3,7 @@ import type { AppInfo, Edition, ServerRecord } from '@msc/shared-types';
 import ServerForm from './ServerForm';
 import BedrockServerForm from './BedrockServerForm';
 import AddExistingServerForm from './AddExistingServerForm';
+import PackServerForm from './PackServerForm';
 import type { InstallController } from '../hooks/useVanillaInstall';
 import type { BedrockInstallController } from '../hooks/useBedrockInstall';
 
@@ -19,7 +20,7 @@ interface CreateServerViewProps {
   onCreated: (server: ServerRecord) => void;
 }
 
-export type CreateMethod = 'install' | 'existing';
+export type CreateMethod = 'install' | 'existing' | 'pack';
 
 /**
  * The "Add Server" view: library folder picker plus a toggle between
@@ -81,10 +82,24 @@ export default function CreateServerView({
         >
           Add Existing Server
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={createMethod === 'pack'}
+          className={`add-server-tab${createMethod === 'pack' ? ' active' : ''}`}
+          onClick={() => setCreateMethod('pack')}
+        >
+          From Server Pack
+        </button>
       </div>
       {libraryPath ? (
         <div className="panel-stretch">
-          {createMethod === 'existing' ? (
+          {createMethod === 'pack' ? (
+            <PackServerForm
+              initialJavaPath={lastJavaPath}
+              onCreated={onCreated}
+            />
+          ) : createMethod === 'existing' ? (
             <AddExistingServerForm
               initialJavaPath={lastJavaPath}
               onCreated={onCreated}

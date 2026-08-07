@@ -57,6 +57,7 @@ export function requiredJavaForMinecraft(minecraftVersion: string): number {
   }
   if (a === 1 && b >= 18) return 17;
   if (a === 1 && b === 17) return 16;
+  // Everything from 1.0 through 1.16.x — including 1.7.10 — runs on Java 8.
   return 8;
 }
 
@@ -387,6 +388,10 @@ export class JavaService {
 }
 
 function extractMajor(versionString: string): number | null {
-  const match = versionString.match(/^(\d+)/);
-  return match ? parseInt(match[1], 10) : null;
+  // Java 8 and earlier report "1.8.0_421" (major is the second segment).
+  const match = versionString.match(/^1\.(\d+)(?:[.\-_]|$)/);
+  if (match) return parseInt(match[1], 10);
+  // Java 9+ reports "21.0.1" (major is the first segment).
+  const modern = versionString.match(/^(\d+)/);
+  return modern ? parseInt(modern[1], 10) : null;
 }

@@ -1,6 +1,6 @@
 {
   "name": "minecraft-server-customizer",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Windows-first desktop application for creating, configuring, running, and managing local Minecraft servers.",
   "license": "MIT",
