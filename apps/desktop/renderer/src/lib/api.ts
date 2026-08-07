@@ -32,6 +32,7 @@ import type {
   ServerStatus,
   ServerTypeOption,
   StartServerError,
+  UpdateInfo,
   UpdatePropertiesRequest,
   UpdateServerInput,
   VanillaVersion,
@@ -41,6 +42,9 @@ import type {
 /** Thin client over the narrow preload bridge. */
 export const api = {
   getAppInfo: () => window.msc.getAppInfo(),
+  checkForUpdate: (): Promise<UpdateInfo> => window.msc.checkForUpdate(),
+  openReleaseUrl: (url: string): Promise<{ ok: boolean }> =>
+    window.msc.openReleaseUrl(url),
   getBackendInfo: () => window.msc.getBackendInfo(),
 
   getSettings: (): Promise<AppSettings> => window.msc.getSettings(),

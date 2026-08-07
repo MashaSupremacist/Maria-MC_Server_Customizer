@@ -440,6 +440,27 @@
   color: var(--danger);
 }
 
+/* ---- Update banner ---- */
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: rgba(57, 230, 109, 0.06);
+  font-size: 12px;
+}
+
+.update-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---- Server picker ---- */
 
 .server-picker {

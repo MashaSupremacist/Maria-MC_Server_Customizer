@@ -21,6 +21,8 @@ export type PageId =
 /** IPC channels exposed through the preload bridge (narrow API only). */
 export const IpcChannels = {
   appInfo: 'app:info',
+  checkForUpdate: 'app:check-for-update',
+  openReleaseUrl: 'app:open-release-url',
   windowMinimize: 'window:minimize',
   windowToggleMaximize: 'window:toggle-maximize',
   windowClose: 'window:close',
@@ -111,6 +113,20 @@ export interface AppInfo {
   name: string;
   version: string;
   platform: string;
+}
+
+/** Result of checking GitHub Releases for a newer app version. */
+export interface UpdateInfo {
+  /** True when a newer version exists on GitHub. */
+  updateAvailable: boolean;
+  /** Latest published version, if known. */
+  latestVersion: string | null;
+  /** Current installed version. */
+  currentVersion: string;
+  /** Release page URL for the latest release. */
+  releaseUrl: string | null;
+  /** Human-readable release notes snippet. */
+  notes: string | null;
 }
 
 /** Connection details for the local Fastify backend. */

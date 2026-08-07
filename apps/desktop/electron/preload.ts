@@ -50,6 +50,8 @@ import type {
  */
 const CHANNELS = {
   appInfo: 'app:info',
+  checkForUpdate: 'app:check-for-update',
+  openReleaseUrl: 'app:open-release-url',
   windowMinimize: 'window:minimize',
   windowToggleMaximize: 'window:toggle-maximize',
   windowClose: 'window:close',
@@ -139,6 +141,10 @@ const CHANNELS = {
  */
 const api = {
   getAppInfo: (): Promise<AppInfo> => ipcRenderer.invoke(CHANNELS.appInfo),
+  checkForUpdate: (): Promise<import('@msc/shared-types').UpdateInfo> =>
+    ipcRenderer.invoke(CHANNELS.checkForUpdate),
+  openReleaseUrl: (url: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(CHANNELS.openReleaseUrl, url),
   minimizeWindow: (): void => ipcRenderer.send(CHANNELS.windowMinimize),
   toggleMaximizeWindow: (): void =>
     ipcRenderer.send(CHANNELS.windowToggleMaximize),

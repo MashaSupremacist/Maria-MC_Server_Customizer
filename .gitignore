@@ -7,6 +7,9 @@ dist-electron/
 out/
 release/
 
+# Bundled runtime binary (staged at packaging time, never committed)
+apps/desktop/resources/bin/
+
 # Logs
 *.log
 npm-debug.log*

@@ -17,15 +17,22 @@
     "typecheck:renderer": "tsc -p tsconfig.json --noEmit",
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
     "typecheck:backend": "tsc -p backend/tsconfig.json --noEmit",
-    "start": "electron ."
+    "start": "electron .",
+    "prepare:backend-deps": "node ../../scripts/prepare-backend-deps.mjs",
+    "predist": "npm run prepare:backend-deps",
+    "predist:dir": "npm run prepare:backend-deps",
+    "dist": "npm run build && electron-builder --win",
+    "dist:dir": "npm run build && electron-builder --dir"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.0",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
     "cross-env": "^7.0.3",
-    "electron": "^33.3.1",
+    "electron": "33.4.11",
+    "electron-builder": "^26.0.12",
     "typescript": "^5.7.3",
     "vite": "^6.0.11"
   },
@@ -33,5 +40,65 @@
     "@msc/shared-types": "*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
+  },
+  "build": {
+    "appId": "com.msc.minecraftservercustomizer",
+    "productName": "Minecraft Server Customizer",
+    "copyright": "Copyright © 2026 Minecraft Server Customizer",
+    "directories": {
+      "output": "../../release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist-electron/**",
+      "dist/renderer/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist",
+        "to": "backend/dist"
+      },
+      {
+        "from": "backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/bin/node.exe",
+        "to": "bin/node.exe"
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Minecraft Server Customizer",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
+    },
+    "artifactName": "${productName}-Setup-${version}.${ext}"
   }
 }

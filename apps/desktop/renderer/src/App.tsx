@@ -20,6 +20,7 @@ import AllowlistPage from './components/AllowlistPage';
 import PermissionsPage from './components/PermissionsPage';
 import PackPage from './components/PackPage';
 import DeleteServerDialog from './components/DeleteServerDialog';
+import UpdateBanner from './components/UpdateBanner';
 import { useServerRuntime } from './hooks/useServerRuntime';
 import { useVanillaInstall } from './hooks/useVanillaInstall';
 import { useBedrockInstall } from './hooks/useBedrockInstall';
@@ -323,6 +324,7 @@ export default function App(): React.JSX.Element {
           onNavigate={setActivePage}
         />
         <main className="content">
+          <UpdateBanner />
           {servers.length > 0 && (
             <div className="server-picker">
               {servers.map((server) => (

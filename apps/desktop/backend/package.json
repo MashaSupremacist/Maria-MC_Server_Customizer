@@ -21,11 +21,13 @@
     "yazl": "^3.3.1"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.7",
     "@types/pidusage": "^2.0.5",
     "@types/ws": "^8.5.13",
     "@types/yazl": "^3.3.1",
+    "electron-builder": "^26.0.12",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8",

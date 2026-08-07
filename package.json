@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "npm run dev -w @msc/desktop",
     "build": "npm run build -w @msc/desktop && npm run build -w @msc/backend",
+    "dist": "npm run dist -w @msc/desktop && node scripts/make-portable-zip.mjs",
     "typecheck": "npm run typecheck -w @msc/desktop && npm run typecheck -w @msc/shared-types && npm run typecheck -w @msc/backend",
     "test": "npm test -w @msc/backend"
   },

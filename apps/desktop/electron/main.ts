@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { checkForUpdate } from './update-check';
 import {
   type AppSettings,
   type BackendInfo,
@@ -56,24 +57,20 @@ let backendStartPromise: Promise<BackendInfo> | null = null;
 
 /**
  * Locate a real Node executable to run the backend child process.
- * process.execPath inside Electron points at electron.exe, which cannot
- * execute a plain Node script, so we need the system Node binary.
+ * - Packaged app: use the node.exe bundled in resources/bin (the backend's
+ *   native modules are compiled for system Node, not Electron's embedded Node).
+ * - Dev / source: use the same Node that launched npm (process.env.NODE is
+ *   set by npm when it runs lifecycle scripts).
  */
 function resolveNodeExecutable(): string {
-  // Allow an explicit override (e.g. packaged app points at a bundled node).
   if (process.env.MSC_NODE_EXECUTABLE) {
     return process.env.MSC_NODE_EXECUTABLE;
   }
-  // Dev / source: the same Node that launched npm runs alongside electron.exe.
-  // process.env.NODE is set by npm when it runs lifecycle scripts.
-  if (process.env.NODE && process.platform !== 'win32') {
-    return process.env.NODE;
+  if (!isDev) {
+    const bundled = path.join(process.resourcesPath, 'bin', 'node.exe');
+    if (fs.existsSync(bundled)) return bundled;
   }
-  if (process.env.NODE) {
-    // On Windows npm sets NODE to the node.exe path.
-    return process.env.NODE;
-  }
-  return process.execPath;
+  return process.env.NODE ?? process.execPath;
 }
 
 /** Where app data lives. In dev, inside the repo so it's easy to inspect. */
@@ -86,7 +83,9 @@ function getDataDir(): string {
 
 function resolveBackendEntry(): string | null {
   const candidates = [
-    // Production: backend compiled next to the desktop app's own node_modules.
+    // Packaged app: backend lives in resources/backend (extraResources).
+    path.join(process.resourcesPath, 'backend', 'dist', 'index.js'),
+    // Production (unpacked): backend compiled next to the desktop app.
     path.join(__dirname, '..', '..', 'backend', 'dist', 'index.js'),
     // Dev via workspace: root node_modules/@msc/backend links to packages.
     path.join(app.getAppPath(), '..', '..', 'node_modules', '@msc', 'backend', 'dist', 'index.js'),
@@ -247,6 +246,21 @@ function registerIpcHandlers(): void {
     version: app.getVersion(),
     platform: process.platform,
   }));
+
+  ipcMain.handle(
+    IpcChannels.checkForUpdate,
+    async (): Promise<import('@msc/shared-types').UpdateInfo> => {
+      return checkForUpdate(app.getVersion());
+    },
+  );
+
+  ipcMain.handle(IpcChannels.openReleaseUrl, async (_event, url: string) => {
+    if (typeof url === 'string' && /^https:\/\/github\.com\//.test(url)) {
+      await shell.openExternal(url);
+      return { ok: true };
+    }
+    return { ok: false };
+  });
 
   ipcMain.handle(IpcChannels.backendInfo, async (): Promise<BackendInfo> => {
     return ensureBackend();
