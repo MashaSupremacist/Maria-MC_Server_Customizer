@@ -80,7 +80,7 @@ sha256sum "Minecraft Server Customizer-Portable-0.1.0.exe"
 The following requirements are for contributors only:
 
 - Windows 10/11
-- Node.js 20 or newer
+- Node.js 24 (release-build version; dependencies require Node.js 22 or newer)
 - npm 10 or newer
 
 Install dependencies and launch the development build:
