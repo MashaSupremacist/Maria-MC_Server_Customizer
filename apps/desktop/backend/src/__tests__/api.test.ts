@@ -336,17 +336,20 @@ function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5000):
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const poll = (): void => {
-      const result = predicate();
-      const check = (val: boolean): void => {
-        if (val) resolve();
-        else if (Date.now() - start > timeoutMs) reject(new Error('waitFor timed out'));
-        else setTimeout(poll, 25);
+      const retryOrReject = (err?: unknown): void => {
+        if (Date.now() - start > timeoutMs) {
+          reject(err instanceof Error ? err : new Error('waitFor timed out'));
+        } else {
+          setTimeout(poll, 25);
+        }
       };
-      if (result instanceof Promise) {
-        void result.then(check);
-      } else {
-        check(result);
-      }
+
+      void Promise.resolve()
+        .then(predicate)
+        .then((matched) => {
+          if (matched) resolve();
+          else retryOrReject();
+        }, retryOrReject);
     };
     poll();
   });

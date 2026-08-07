@@ -28,7 +28,16 @@ const roots = { ...(backendPkg.dependencies ?? {}) };
 delete roots['@msc/shared-types']; // type-only at runtime; never required
 
 if (fs.existsSync(dest)) {
-  fs.rmSync(dest, { recursive: true, force: true });
+  try {
+    fs.rmSync(dest, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  } catch (err) {
+    // A running development backend can hold native modules open on Windows.
+    // Refreshing every dependency in place is safe and avoids leaving a
+    // partially deleted staging tree; stale files only make the package larger.
+    console.warn(
+      `Could not fully clear ${dest}; refreshing staged dependencies in place (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
 }
 fs.mkdirSync(dest, { recursive: true });
 

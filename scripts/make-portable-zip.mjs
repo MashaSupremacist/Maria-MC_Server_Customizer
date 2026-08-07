@@ -32,9 +32,14 @@ if (fs.existsSync(zipPath)) {
   fs.rmSync(zipPath, { force: true });
 }
 
-// Use bsdtar (Windows 10+ ships it as tar.exe) to create the zip.
+// Prefer Windows' bundled bsdtar even when this script is launched from Git
+// Bash. Git Bash's tar treats a native `C:` archive path as a remote host.
+const tarExecutable = process.platform === 'win32'
+  ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+  : 'tar';
+
 const result = spawnSync(
-  'tar',
+  tarExecutable,
   ['-a', '-c', '-f', zipPath, '-C', unpackedDir, '.'],
   { stdio: 'inherit' },
 );

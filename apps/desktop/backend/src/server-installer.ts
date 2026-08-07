@@ -394,7 +394,6 @@ export class ServerInstallerService {
     try {
       for (;;) {
         if (isCanceled()) {
-          file.destroy();
           throw new DownloadCanceledError();
         }
         const { done, value } = await reader.read();
@@ -413,8 +412,14 @@ export class ServerInstallerService {
           await new Promise<void>((resolve) => file.once('drain', resolve));
         }
       }
-    } finally {
-      file.end();
+      await new Promise<void>((resolve, reject) => {
+        file.once('finish', resolve);
+        file.once('error', reject);
+        file.end();
+      });
+    } catch (err) {
+      file.destroy();
+      throw err;
     }
   }
 }

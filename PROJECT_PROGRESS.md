@@ -594,36 +594,66 @@ Phases 12 and 13 were combined into a single flavor abstraction because Fabric, 
 
 - The build is **unsigned** (no code-signing certificate). Windows SmartScreen will warn on first run. A signing cert can be added later via `win.certificateFile` / `CSC_LINK` + `CSC_KEY_PASSWORD` in CI secrets.
 - `node.exe` (~92 MB) is bundled to guarantee backend ABI compatibility, making the installer/portable ~117 MB. A future optimization: rebuild better-sqlite3 for Electron's ABI (`buildDependenciesFromSource: true` on a CI runner with VS Build Tools) and drop the bundled node.
-- The pre-existing flaky installer tests (fake-HTTP races) still fail intermittently under parallel workers — unrelated to Phase 15.
+- The Windows installer/download stream race was fixed after packaging: downloads now wait for the destination stream to finish before verification or conversion renames the file. The formerly flaky `server-installer` suite now completes reliably in isolation.
+
+---
+
+## UI Polish: Fullscreen Layout (Phase 16)
+
+**Status:** Complete
+
+**Goal:** Use the extra space when the window is maximized or fullscreen instead of leaving a large empty band on the right, with controls and text "a bit bigger, not too big." Purely a CSS change — no component/JSX edits.
+
+### Implemented
+
+- **Page column widened and centered**: `.page` `max-width` 900px → 1320px with `margin: 0 auto`. The 220px sidebar + 900px cap left only ~700px of content on a 1920px screen; the column now fills the window at fullscreen without stretching edge-to-edge on ultra-wide monitors.
+- **"A bit bigger" sizing** (~8% bump across the UI):
+  - Base font 13px → 14px; page titles 16px → 20px; body rows 13px → 14px
+  - Buttons 32px → 36px (small buttons 26px → 30px), inputs 34px → 38px, nav rows 30px → 34px, server chips 26px → 30px
+  - Stat values 16px → 18px, stat tiles padded 10px → 14px
+  - Panels padded 12px → 16px; tables bumped to 13px with roomier cell padding
+  - Console font 12px → 12.5px (mono gets chunky fast); dialogs 480px → 540px
+- **Settings page uses the new width**: its field list (direct child of `section.page`) is now a responsive CSS grid — `repeat(auto-fill, minmax(420px, 1fr))` — so fields flow into two columns on wide windows and collapse back to one below ~1100px window width (the 960px minimum stays usable). Gamerules' nested lists are untouched and stay single-column grouped. Settings inputs widened 220px → 280px.
+- **Wide-screen media query** (`@media (min-width: 1600px)`): sidebar 220px → 240px, roomier page padding, more stat-tile gap.
+- Console unchanged structurally (already `.page-full`); it inherits the wider page padding.
+
+### Verification notes
+
+- CSS brace-balance check passed on both stylesheets.
+- Renderer production build passes (`npm run build:renderer` → Vite build clean).
+- Diff confined to `theme.css` (1 line) + `app.css` (~130 lines).
+- Manual verification pending: walk every page at default / maximized / fullscreen, confirm no horizontal scrollbar and that the Settings 2-column layout + sticky save bar render correctly; shrink to the 960px minimum and confirm Settings collapses to one column.
+
+### Risk notes
+
+- The Settings 2-column grid is the only layout-structure change. Fallback if a field's description/error layout misbehaves in a grid cell: drop the grid rule (keep single-column with the wider 280px inputs).
+- `.page` centering shifts content from left-aligned to centered on wide screens.
 
 ---
 
 ## Git and GitHub Publishing
 
-**Status:** Local repo ready; publishing in progress (via GitHub Desktop).
+**Status:** Public repository available at [MashaSupremacist/Minecraft-Server-Customizer](https://github.com/MashaSupremacist/Minecraft-Server-Customizer).
 
-### Local repository
+### Repository
 
-- The project now lives in its **own git repository** at `C:\GitHub Repos\Minecraft Server Customizer` (previously the folder sat inside a larger umbrella repo that was never committed).
-- Branch: `main` (renamed from `master` to match GitHub's default).
-- Commits:
-  1. `4b7615e` — Initial commit: Phases 1–14 source
-  2. `6c5bf1b` — Ignore umbrella-repo leftover files
-  3. `e457340` — Phase 15: packaging, installer, portable ZIP, CI release workflow
-- `.gitignore` excludes `node_modules/`, `dist/`, `release/`, `data/`, `apps/desktop/resources/bin/` (bundled node staged at build time), and local scratch files.
-- No remotes configured yet.
+- Branch: `main`.
+- Release artifacts remain out of source control and are published under **GitHub Releases**.
+- The release workflow publishes the installer, portable EXE, portable ZIP, and `SHA256SUMS.txt` from version tags.
+- End users download a packaged EXE directly; Node.js and npm are contributor/build requirements only.
 
-### Publishing steps (GitHub Desktop)
+### Publishing a release
 
-1. Add the local repo (`File → Add Local Repository` → the project folder).
-2. **Publish repository** — creates the GitHub repo and pushes `main`.
-3. Tag the top commit `v0.1.0` and push the tag — the GitHub Actions workflow builds fresh installer/portable/checksums and attaches them to a GitHub Release.
+1. Commit and push the release-ready source to `main`.
+2. Tag that commit, for example `v0.1.0`.
+3. Push the tag. GitHub Actions builds and publishes all four release assets.
+4. Verify the workflow and download links under **Actions** and **Releases**.
 
 ### What appears on GitHub
 
 - **Source repo**: source code only — no exe files (the `release/` folder is gitignored). Artifacts are attached under **Releases → v0.1.0 → Assets** by CI:
   - `Minecraft Server Customizer-Setup-0.1.0.exe`
-  - `Minecraft Server Customizer-Portable-0.1.0.exe` (CI-only artifact; the portable target)
+  - `Minecraft Server Customizer-Portable-0.1.0.exe`
   - `Minecraft Server Customizer-Portable-0.1.0.zip`
   - `SHA256SUMS.txt`
 - The in-app update banner reads the GitHub Releases API, so `v0.1.0` becomes the baseline for future update notifications.
