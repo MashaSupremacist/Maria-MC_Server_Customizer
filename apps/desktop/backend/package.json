@@ -1,0 +1,34 @@
+{
+  "name": "@msc/backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Fastify backend for the Minecraft Server Customizer.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.0.1",
+    "@msc/shared-types": "*",
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.2.1",
+    "pidusage": "^3.0.2",
+    "yauzl": "^2.10.0",
+    "yazl": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.7",
+    "@types/pidusage": "^2.0.5",
+    "@types/ws": "^8.5.13",
+    "@types/yazl": "^3.3.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8",
+    "ws": "^8.18.0"
+  }
+}

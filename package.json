@@ -1,0 +1,22 @@
+{
+  "name": "minecraft-server-customizer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows-first desktop application for creating, configuring, running, and managing local Minecraft servers.",
+  "license": "MIT",
+  "workspaces": [
+    "apps/*",
+    "apps/*/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @msc/desktop",
+    "build": "npm run build -w @msc/desktop && npm run build -w @msc/backend",
+    "typecheck": "npm run typecheck -w @msc/desktop && npm run typecheck -w @msc/shared-types && npm run typecheck -w @msc/backend",
+    "test": "npm test -w @msc/backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}
