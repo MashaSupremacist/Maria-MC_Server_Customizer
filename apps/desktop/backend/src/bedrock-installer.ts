@@ -281,7 +281,6 @@ export class BedrockInstallerService {
     try {
       for (;;) {
         if (isCanceled()) {
-          file.destroy();
           throw new DownloadCanceledError();
         }
         const { done, value } = await reader.read();
@@ -297,11 +296,20 @@ export class BedrockInstallerService {
           }
         }
         if (!file.write(Buffer.from(value))) {
-          await new Promise<void>((resolve) => file.once('drain', resolve));
+          await new Promise<void>((resolve, reject) => {
+            file.once('drain', resolve);
+            file.once('error', reject);
+          });
         }
       }
-    } finally {
       file.end();
+      await new Promise<void>((resolve, reject) => {
+        file.once('finish', resolve);
+        file.once('error', reject);
+      });
+    } catch (err) {
+      file.destroy();
+      throw err;
     }
   }
 

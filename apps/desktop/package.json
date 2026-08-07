@@ -1,6 +1,6 @@
 {
   "name": "@msc/desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Minecraft Server Customizer desktop application (Electron + React + Vite).",
   "main": "dist-electron/main.js",
@@ -78,11 +78,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico",

@@ -1,9 +1,9 @@
 import type { FlavorResolver, ResolvedDownload } from './types';
 
-const PAPER_API = 'https://papermc.io/api/v2/projects/paper';
+const PAPER_API = 'https://fill.papermc.io/v3/projects/paper';
 
 interface ProjectResponse {
-  versions: string[];
+  versions: Record<string, string[]>;
 }
 
 interface BuildsResponse {
@@ -12,13 +12,20 @@ interface BuildsResponse {
 
 interface BuildResponse {
   downloads: {
-    application: { name: string; sha256: string };
+    'server:default'?: {
+      name: string;
+      size: number;
+      checksums: { sha256?: string };
+      url: string;
+    };
   };
 }
 
 /**
  * Resolver for Paper servers. Paper publishes a single server jar per
  * version/build; the latest stable build is used unless overridden.
+ * Uses the current v3 API (the v2 API was sunset; fill.papermc.io is the
+ * canonical replacement).
  */
 export class PaperResolver implements FlavorResolver {
   private readonly fetchImpl: typeof fetch;
@@ -34,7 +41,7 @@ export class PaperResolver implements FlavorResolver {
     const res = await this.fetchImpl(this.apiUrl);
     if (!res.ok) throw new Error(`Failed to fetch Paper versions (${res.status})`);
     const data = (await res.json()) as ProjectResponse;
-    return [...data.versions].reverse();
+    return Object.keys(data.versions).sort(compareVersions).reverse();
   }
 
   /** Build numbers for a version, newest first. */
@@ -69,10 +76,25 @@ export class PaperResolver implements FlavorResolver {
       throw new Error(`Failed to fetch Paper build ${build} (${res.status})`);
     }
     const data = (await res.json()) as BuildResponse;
-    const app = data.downloads?.application;
+    const app = data.downloads?.['server:default'];
     if (!app) {
-      throw new Error(`Paper build ${build} has no application download`);
+      throw new Error(`Paper build ${build} has no server download`);
     }
-    return [{ url: `${this.apiUrl}/versions/${request.version}/builds/${build}/downloads/${app.name}`, sha1: undefined, fileName: `paper-${request.version}-${build}.jar` }];
+    return [{
+      url: app.url,
+      sha1: undefined,
+      fileName: `paper-${request.version}-${build}.jar`,
+    }];
   }
+}
+
+/** Compare MC version strings numerically by dotted segment (e.g. 1.21.1 > 1.21). */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }

@@ -25,6 +25,8 @@ import type {
   JavaProgress,
   JavaRequirement,
   LogLine,
+  ModpackImportRequest,
+  ModpackImportResult,
   PackKind,
   PackListResponse,
   PlayerListEntry,
@@ -123,6 +125,8 @@ const CHANNELS = {
   enableExtension: 'extensions:enable',
   disableExtension: 'extensions:disable',
   deleteExtension: 'extensions:delete',
+  selectModpack: 'modpack:select',
+  importModpack: 'modpack:import',
   getBedrockVersions: 'bedrock:versions',
   installBedrockServer: 'bedrock:install',
   cancelBedrockInstall: 'bedrock:install:cancel',
@@ -305,6 +309,10 @@ const api = {
     ipcRenderer.invoke(CHANNELS.disableExtension, serverId, name),
   deleteExtension: (serverId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke(CHANNELS.deleteExtension, serverId, name),
+  selectModpack: (): Promise<FolderSelectResult> =>
+    ipcRenderer.invoke(CHANNELS.selectModpack),
+  importModpack: (request: ModpackImportRequest): Promise<ModpackImportResult> =>
+    ipcRenderer.invoke(CHANNELS.importModpack, request),
 
   getBedrockVersions: (): Promise<BedrockVersion[]> =>
     ipcRenderer.invoke(CHANNELS.getBedrockVersions),

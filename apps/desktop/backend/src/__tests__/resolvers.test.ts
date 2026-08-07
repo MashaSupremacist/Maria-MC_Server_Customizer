@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { FabricResolver } from '../resolvers/fabric';
 import { PaperResolver } from '../resolvers/paper';
 import { ForgeResolver } from '../resolvers/forge';
@@ -93,10 +96,19 @@ describe.sequential('resolvers', () => {
 
   it('paper resolves a build jar', async () => {
     const { baseUrl, server: s } = await startFakeServer({
-      '/project': (_req, res) => json(res, { versions: ['1.21', '1.21.1'] }),
+      '/project': (_req, res) => json(res, { versions: { '1.21.1': ['1.21.1'], '1.21': ['1.21'] } }),
       '/project/versions/1.21.1': (_req, res) => json(res, { builds: [10, 11] }),
       '/project/versions/1.21.1/builds/11': (_req, res) =>
-        json(res, { downloads: { application: { name: 'paper-1.21.1-11.jar', sha256: 'abc' } } }),
+        json(res, {
+          downloads: {
+            'server:default': {
+              name: 'paper-1.21.1-11.jar',
+              size: 123,
+              checksums: { sha256: 'abc' },
+              url: `${baseUrl}/project/versions/1.21.1/builds/11/downloads/paper-1.21.1-11.jar`,
+            },
+          },
+        }),
       '/project/versions/1.21.1/builds/11/downloads/paper-1.21.1-11.jar': (_req, res) => res.end('paper'),
     });
     server = s;
@@ -123,5 +135,75 @@ describe.sequential('resolvers', () => {
     const downloads = await resolver.resolveDownloads({ version: '1.21.1' });
     expect(downloads[0].fileName).toBe('forge-installer.jar');
     expect(downloads[0].url).toContain('forge-1.21.1-52.0.57-installer.jar');
+  });
+
+  it('forge installStep runs the installer with a configured javaPath', async () => {
+    const { baseUrl, server: s } = await startFakeServer({
+      '/maven/net/minecraftforge/forge/maven-metadata.xml': (_req, res) => {
+        res.setHeader('content-type', 'application/xml');
+        res.end(
+          `<?xml version="1.0"?><metadata><groupId>net.minecraftforge</groupId><artifactId>forge</artifactId><versioning><latest>1.21.1-52.0.57</latest><versions><version>1.21.1-52.0.57</version></versions></versioning></metadata>`,
+        );
+      },
+    });
+    server = s;
+
+    // A fake "java": a .cmd that calls node, writes a marker proving it ran,
+    // and creates the server jar the real Forge installer would produce, so
+    // installStep can complete. The installer args (-jar ... --installServer)
+    // are ignored because the wrapper invokes node with its own script.
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'msc-forge-java-'));
+    try {
+      const fakeJava = path.join(folder, 'fake-java.cmd');
+      const marker = path.join(folder, 'ran.txt');
+      fs.writeFileSync(
+        fakeJava,
+        [
+          '@echo off',
+          `node -e "require('node:fs').writeFileSync(process.argv[1], 'ran'); require('node:fs').writeFileSync(process.argv[2], 'x')" "${marker}" forge-1.21.1-52.0.57.jar`,
+          '',
+        ].join('\r\n'),
+      );
+      fs.writeFileSync(path.join(folder, 'forge-installer.jar'), 'not a real jar');
+
+      const resolver = new ForgeResolver({ fetchImpl: fetch, mavenUrl: `${baseUrl}/maven/net/minecraftforge/forge` });
+      await resolver.installStep({
+        version: '1.21.1',
+        serverFolder: folder,
+        javaPath: fakeJava,
+      });
+      expect(fs.existsSync(marker)).toBe(true);
+      expect(fs.existsSync(path.join(folder, 'forge-1.21.1-52.0.57.jar'))).toBe(true);
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
+  it('forge installStep fails with a clear message when the configured java is missing', async () => {
+    const { baseUrl, server: s } = await startFakeServer({
+      '/maven/net/minecraftforge/forge/maven-metadata.xml': (_req, res) => {
+        res.setHeader('content-type', 'application/xml');
+        res.end(
+          `<?xml version="1.0"?><metadata><groupId>net.minecraftforge</groupId><artifactId>forge</artifactId><versioning><latest>1.21.1-52.0.57</latest><versions><version>1.21.1-52.0.57</version></versions></versioning></metadata>`,
+        );
+      },
+    });
+    server = s;
+
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'msc-forge-nojava-'));
+    try {
+      fs.writeFileSync(path.join(folder, 'forge-installer.jar'), 'not a real jar');
+
+      const resolver = new ForgeResolver({ fetchImpl: fetch, mavenUrl: `${baseUrl}/maven/net/minecraftforge/forge` });
+      await expect(
+        resolver.installStep({
+          version: '1.21.1',
+          serverFolder: folder,
+          javaPath: path.join(folder, 'missing-java.exe'),
+        }),
+      ).rejects.toThrow(/Java executable not found/);
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
   });
 });

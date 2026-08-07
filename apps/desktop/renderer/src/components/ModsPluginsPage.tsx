@@ -16,7 +16,6 @@ interface ModsPluginsPageProps {
 }
 
 interface ConvertState {
-  open: boolean;
   busy: boolean;
   error: string | null;
   target: ServerFlavor;
@@ -44,7 +43,6 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
   const [busy, setBusy] = useState(false);
   const [serverTypes, setServerTypes] = useState<ServerTypeOption[]>([]);
   const [convert, setConvert] = useState<ConvertState>({
-    open: false,
     busy: false,
     error: null,
     target: 'fabric',
@@ -75,36 +73,55 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
     void api.listServerTypes().then(setServerTypes).catch(() => undefined);
   }, []);
 
-  // Subscribe to install:progress for convert progress.
+  // Subscribe to install:progress for convert progress. The operation id is
+  // the only way to attribute an event to this page's convert, so startConvert
+  // records it and the handler ignores events for other operations.
+  const [convertOperationId, setConvertOperationId] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     void connectWebSocket().then((ws) => {
       if (cancelled) return;
       ws.onEvent((event) => {
         if (event.type !== 'install:progress') return;
-        setConvert((prev) => {
-          if (!prev.open || !prev.progress) return prev;
-          const progress = event.progress;
-          if (progress.status === 'complete') {
-            setBusy(false);
-            setConvert({ ...prev, open: false, busy: false, progress: null });
-            setNotice('Server type converted.');
-            void refresh();
-            return prev;
-          }
-          if (progress.status === 'failed' || progress.status === 'canceled') {
-            setBusy(false);
-            setConvert({ ...prev, busy: false, progress: null, error: progress.message });
-            return prev;
-          }
-          return { ...prev, progress: progress.message };
-        });
+        if (event.installId !== convertOperationId) return;
+        const progress = event.progress;
+        if (progress.status === 'complete') {
+          setBusy(false);
+          setConvertOperationId(null);
+          setConvert((prev) => ({ ...prev, busy: false, progress: null }));
+          setNotice('Server type converted.');
+          void refresh();
+        } else if (progress.status === 'failed' || progress.status === 'canceled') {
+          setBusy(false);
+          setConvertOperationId(null);
+          setConvert((prev) => ({ ...prev, busy: false, progress: null, error: progress.message }));
+        } else {
+          setConvert((prev) => ({ ...prev, progress: progress.message }));
+        }
       });
     });
     return () => {
       cancelled = true;
     };
-  }, [refresh]);
+  }, [convertOperationId, refresh]);
+
+  // Defensive timeout: if the backend never emits a terminal install:progress
+  // event (e.g. WebSocket dropped), stop showing "Converting…" forever.
+  useEffect(() => {
+    if (!convert.busy) return;
+    const timer = setTimeout(() => {
+      setBusy(false);
+      setConvertOperationId(null);
+      setConvert((prev) => ({
+        ...prev,
+        busy: false,
+        progress: null,
+        error: 'Conversion timed out. Check the backend connection and try again.',
+      }));
+    }, 120_000);
+    return () => clearTimeout(timer);
+  }, [convert.busy]);
 
   const requireStopped = (): boolean => {
     if (serverRunning) {
@@ -186,6 +203,38 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
     if (!res.ok) setError(res.error ?? 'Could not open folder.');
   };
 
+  const importModpack = async (): Promise<void> => {
+    if (requireStopped()) return;
+    if (server.serverType !== 'fabric' && server.serverType !== 'forge') {
+      setError('Modpacks require a Fabric or Forge server. Convert the server first.');
+      return;
+    }
+    const picked = await api.selectModpack();
+    if (!picked.path) return;
+    setBusy(true);
+    setError(null);
+    setNotice('Importing modpack…');
+    try {
+      const res = await api.importModpack({ serverId: server.id, filePath: picked.path });
+      if (!res.ok) {
+        setError(res.error ?? 'Modpack import failed.');
+        setNotice(null);
+      } else {
+        setNotice(
+          `Modpack imported: ${res.modsAdded} mod(s), ${res.filesCopied} file(s) copied` +
+            (res.skipped > 0 ? ` (${res.skipped} skipped)` : '') +
+            '. Restart the server to load them.',
+        );
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setNotice(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const startConvert = async (): Promise<void> => {
     if (requireStopped()) return;
     setBusy(true);
@@ -197,6 +246,9 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
         setBusy(false);
         return;
       }
+      // Record the operation id so install:progress events are attributed to
+      // this convert (the backend emits a stream keyed by operationId).
+      setConvertOperationId(res.operationId);
       setConvert((c) => ({ ...c, progress: 'Downloading…' }));
     } catch (err) {
       setConvert((c) => ({ ...c, busy: false, error: err instanceof Error ? err.message : String(err) }));
@@ -259,6 +311,16 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
               <button type="button" className="btn btn-sm" onClick={() => void openFolder()}>
                 Open Folder
               </button>
+              {(server.serverType === 'fabric' || server.serverType === 'forge') && (
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busy || serverRunning}
+                  onClick={() => void importModpack()}
+                >
+                  Import Modpack (.mrpack / .zip)
+                </button>
+              )}
               {serverRunning && <span className="muted">Stop the server to modify files.</span>}
             </div>
           </div>

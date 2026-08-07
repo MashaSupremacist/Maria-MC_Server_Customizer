@@ -219,6 +219,25 @@ export async function inspectJar(
         }
       }
     }
+    // Forge mods ship META-INF/mods.toml (NeoForge: META-INF/neoforge.mods.toml).
+    if (flavor === 'forge') {
+      for (const entryName of ['META-INF/mods.toml', 'META-INF/neoforge.mods.toml']) {
+        const toml = await readZipEntry(jarPath, entryName);
+        if (!toml) continue;
+        const parsed = parseModsToml(toml);
+        if (parsed) {
+          return {
+            displayName: parsed.displayName,
+            version: parsed.version,
+            description: parsed.description,
+            authors: parsed.authors,
+            kind: 'mod',
+            mcVersion: parsed.mcVersion,
+            dependencies: parsed.dependencies,
+          };
+        }
+      }
+    }
     if (flavor === 'paper') {
       for (const entryName of ['paper-plugin.yml', 'plugin.yml']) {
         const text = await readZipEntry(jarPath, entryName);
@@ -289,7 +308,71 @@ function readZipEntry(zipPath: string, entryName: string): Promise<string | null
 }
 
 /**
- * Minimal YAML parser for plugin.yml metadata. Handles top-level scalar keys
+ * Parse Forge/NeoForge META-INF/mods.toml into the metadata we surface.
+ * A TOML-lite parser: reads the [mods] table's first entry and the
+ * [[dependencies.<modId>]] entries. Returns null when nothing usable.
+ */
+function parseModsToml(text: string): {
+  displayName: string;
+  version?: string;
+  description?: string;
+  authors?: string[];
+  mcVersion?: string;
+  dependencies?: string[];
+} | null {
+  const lines = text.split(/\r?\n/);
+  let inMods = false;
+  let inDepMod = false;
+  const depMods: string[] = [];
+  const mod: Record<string, string> = {};
+  let modId: string | null = null;
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const tableMatch = /^\[\[?([A-Za-z0-9_.-]+)\]?\]?$/.exec(line);
+    if (tableMatch) {
+      const table = tableMatch[1];
+      inMods = table === 'mods';
+      inDepMod = table.startsWith('dependencies.');
+      continue;
+    }
+    if (inDepMod) {
+      const m = line.match(/^modId\s*=\s*"([^"]+)"/);
+      if (m && m[1] !== modId) depMods.push(m[1]);
+      continue;
+    }
+    if (!inMods) continue;
+    const m = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*("(?:[^"\\]|\\.)*"|\[.*\]|\{.*\}|[^\s]+)/);
+    if (!m) continue;
+    let value = m[2];
+    if (value.startsWith('"')) {
+      value = value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+    mod[m[1]] = value;
+    if (m[1] === 'modId') modId = value;
+  }
+
+  if (!modId && !mod.displayName) return null;
+  const displayName = mod.displayName ?? mod.name ?? modId ?? '';
+  return {
+    displayName,
+    version: mod.version,
+    description: mod.description,
+    authors: mod.authors
+      ? mod.authors
+          .replace(/^\[|\]$/g, '')
+          .split(',')
+          .map((a) => a.trim().replace(/^"|"$/g, ''))
+          .filter(Boolean)
+      : undefined,
+    mcVersion: undefined,
+    dependencies: depMods.length > 0 ? depMods : undefined,
+  };
+}
+
+/** Minimal YAML parser for plugin.yml metadata. Handles top-level scalar keys
  * and indented list items under a key (e.g. "authors:").
  */
 function parseSimpleYaml(text: string): Record<string, unknown> {

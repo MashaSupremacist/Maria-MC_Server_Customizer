@@ -26,6 +26,7 @@ import {
   type JavaProgress,
   type JavaRequirement,
   type LogLine,
+  type ModpackImportResult,
   type PackKind,
   type PackListResponse,
   type PlayerListEntry,
@@ -60,6 +61,7 @@ import { BedrockInstallerService } from './bedrock-installer';
 import { BedrockPropertiesService } from './bedrock-properties';
 import { BedrockPlayerService } from './bedrock-player-service';
 import { PackService } from './pack-service';
+import { ModpackService } from './modpack-service';
 
 const SERVER_CREATE_SCHEMA = {
   type: 'object',
@@ -331,6 +333,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   const bedrockPropertiesService = new BedrockPropertiesService(db);
   const bedrockPlayerService = new BedrockPlayerService(db, (id) => manager.runningServerId() === id);
   const packService = new PackService(db, (id) => manager.runningServerId() === id);
+  const modpackService = new ModpackService(db, broadcast);
+  modpackService.setRunningServerId(() => manager.runningServerId());
 
   // Private runtimes live under the app data dir.
   const runtimesDir = path.join(dataDir, 'runtimes', 'java');
@@ -826,6 +830,17 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     '/servers/:id/extensions/delete',
     async (request): Promise<{ ok: boolean; error?: string }> => {
       return extensionManager.delete(request.params.id, request.body.name);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { filePath?: string; force?: boolean } }>(
+    '/servers/:id/modpack-import',
+    async (request): Promise<ModpackImportResult> => {
+      return modpackService.import(
+        request.params.id,
+        request.body.filePath ?? '',
+        request.body.force ?? false,
+      );
     },
   );
 

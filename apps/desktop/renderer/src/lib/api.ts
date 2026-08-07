@@ -10,6 +10,7 @@ import type {
   CreateServerInput,
   DetectedServerInfo,
   ExtensionListResponse,
+  FolderSelectResult,
   GamerulesDocument,
   ImportWorldRequest,
   InstallBedrockRequest,
@@ -21,6 +22,8 @@ import type {
   JavaProgress,
   JavaRequirement,
   LogLine,
+  ModpackImportRequest,
+  ModpackImportResult,
   PackKind,
   PackListResponse,
   PlayerListEntry,
@@ -187,6 +190,9 @@ export const api = {
     window.msc.disableExtension(serverId, name),
   deleteExtension: (serverId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
     window.msc.deleteExtension(serverId, name),
+  selectModpack: (): Promise<FolderSelectResult> => window.msc.selectModpack(),
+  importModpack: (request: ModpackImportRequest): Promise<ModpackImportResult> =>
+    window.msc.importModpack(request),
 
   getBedrockVersions: (): Promise<BedrockVersion[]> => window.msc.getBedrockVersions(),
   installBedrockServer: (request: InstallBedrockRequest): Promise<{ installId: string }> =>

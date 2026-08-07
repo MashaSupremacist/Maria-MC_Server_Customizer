@@ -70,6 +70,7 @@ export class ForgeResolver implements FlavorResolver {
     version: string;
     serverFolder: string;
     forgeBuild?: string;
+    javaPath?: string | null;
   }): Promise<void> {
     const forgeVersion = await this.resolveForgeVersion(request.version, request.forgeBuild);
     const installerJar = path.join(request.serverFolder, 'forge-installer.jar');
@@ -77,17 +78,45 @@ export class ForgeResolver implements FlavorResolver {
       throw new Error(`Forge installer not found: ${installerJar}`);
     }
 
+    // Resolve a java executable: prefer the configured server java, then
+    // JAVA_HOME, then PATH. Packaged machines often have no Java on PATH, so
+    // the configured javaPath is what makes Forge converts work there.
+    let javaPath: string;
+    if (request.javaPath) {
+      // An explicitly configured path is authoritative: fail loudly rather
+      // than silently falling back to PATH when it is broken.
+      if (!fs.existsSync(request.javaPath)) {
+        throw new Error(
+          `Java executable not found: ${request.javaPath}. Configure a valid Java path in Settings, then try again.`,
+        );
+      }
+      javaPath = request.javaPath;
+    } else if (process.env.JAVA_HOME) {
+      const javaHomeExe = path.join(process.env.JAVA_HOME, 'bin', 'java.exe');
+      const javaHomeBin = path.join(process.env.JAVA_HOME, 'bin', 'java');
+      javaPath = fs.existsSync(javaHomeExe) ? javaHomeExe : javaHomeBin;
+    } else {
+      // Last resort: rely on PATH.
+      javaPath = 'java';
+    }
+
     await runProcess(
-      process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe') : 'java',
+      javaPath,
       ['-jar', installerJar, '--installServer'],
       request.serverFolder,
     );
 
     // The installer writes the runnable server jar: forge-<mc>-<build>.jar
+    // (some modern installers also drop a -shim.jar, which is a thin launcher
+    // that is also runnable). Prefer the real jar and remove the shim so the
+    // launcher never picks the shim over the full server jar.
     const expected = `forge-${forgeVersion}.jar`;
     const serverJar = path.join(request.serverFolder, expected);
-    if (!fs.existsSync(serverJar)) {
-      // Fall back to any forge-*.jar present.
+    const shim = path.join(request.serverFolder, `forge-${forgeVersion}-shim.jar`);
+    if (fs.existsSync(serverJar)) {
+      fs.rmSync(shim, { force: true });
+    } else if (!fs.existsSync(shim)) {
+      // Fall back to any forge-*.jar present (older installer naming).
       const candidates = fs
         .readdirSync(request.serverFolder)
         .filter((f) => f.startsWith('forge-') && f.endsWith('.jar') && f !== 'forge-installer.jar');
@@ -119,14 +148,30 @@ export class ForgeResolver implements FlavorResolver {
   }
 }
 
-/** Run a child process to completion, streaming output to stderr. */
+/** Run a child process to completion, capturing output for diagnostics. */
 function runProcess(command: string, args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit' });
+    // Windows cannot exec a .cmd/.bat directly; route them through cmd /c
+    // (mirrors java-service.ts handling of java wrappers).
+    const isCmdWrapper = /\.(cmd|bat)$/i.test(command);
+    const child = isCmdWrapper
+      ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command, ...args], {
+          cwd,
+          windowsHide: true,
+        })
+      : spawn(command, args, { cwd, windowsHide: true });
+    const output: string[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => output.push(chunk.toString()));
+    child.stderr?.on('data', (chunk: Buffer) => output.push(chunk.toString()));
     child.on('error', (err) => reject(new Error(`Failed to run ${command}: ${err.message}`)));
     child.on('exit', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Forge installer exited with code ${code}`));
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const tail = output.join('').trim().split(/\r?\n/).slice(-8).join('\n');
+      const detail = tail ? `\n${tail}` : '';
+      reject(new Error(`Forge installer exited with code ${code}${detail}`));
     });
   });
 }

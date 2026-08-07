@@ -42,14 +42,33 @@ function startFakeServer(): Promise<{ baseUrl: string; server: Server; jarSha1: 
         res.end(jarContent);
       } else if (url === '/paper/project') {
         res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ versions: ['1.21.1'] }));
+        res.end(JSON.stringify({ versions: { '1.21.1': ['1.21.1'] } }));
       } else if (url === '/paper/project/versions/1.21.1') {
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ builds: [123] }));
       } else if (url === '/paper/project/versions/1.21.1/builds/123') {
         res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ downloads: { application: { name: 'paper-1.21.1-123.jar', sha256: 'abc' } } }));
+        res.end(
+          JSON.stringify({
+            downloads: {
+              'server:default': {
+                name: 'paper-1.21.1-123.jar',
+                size: jarContent.length,
+                checksums: { sha256: 'abc' },
+                url: '/paper/project/versions/1.21.1/builds/123/downloads/paper-1.21.1-123.jar',
+              },
+            },
+          }),
+        );
       } else if (url === '/paper/project/versions/1.21.1/builds/123/downloads/paper-1.21.1-123.jar') {
+        res.end(jarContent);
+      } else if (url === '/forge/net/minecraftforge/forge/maven-metadata.xml') {
+        res.setHeader('content-type', 'application/xml');
+        res.end(
+          `<?xml version="1.0"?><metadata><groupId>net.minecraftforge</groupId><artifactId>forge</artifactId><versioning><latest>1.21.1-52.0.57</latest><versions><version>1.21.1-52.0.57</version></versions></versioning></metadata>`,
+        );
+      } else if (url.startsWith('/forge/net/minecraftforge/forge/1.21.1-52.0.57/forge-1.21.1-52.0.57-installer.jar')) {
+        res.setHeader('content-type', 'application/java-archive');
         res.end(jarContent);
       } else {
         res.statusCode = 404;
@@ -68,7 +87,9 @@ function makeFetch(baseUrl: string): typeof fetch {
     const rewritten = url
       .replace('http://fake', baseUrl)
       .replace('https://meta.fabricmc.net/v2/versions', `${baseUrl}/fabric`)
-      .replace('https://papermc.io/api/v2/projects/paper', `${baseUrl}/paper/project`);
+      .replace('https://fill.papermc.io/v3/projects/paper', `${baseUrl}/paper/project`)
+      .replace('https://maven.minecraftforge.net/net/minecraftforge/forge', `${baseUrl}/forge/net/minecraftforge/forge`)
+      .replace(/^\/(paper|forge)\//, `${baseUrl}/$1/`);
     const req = new Request(rewritten, init);
     return fetch(req);
   };
@@ -107,6 +128,7 @@ describe.sequential('ServerInstallerService', () => {
       vanillaManifestUrl: `${fake.baseUrl}/manifest`,
       fabricMetaUrl: `${fake.baseUrl}/fabric`,
       paperApiUrl: `${fake.baseUrl}/paper/project`,
+      forgeMavenUrl: `${fake.baseUrl}/forge/net/minecraftforge/forge`,
     });
   }
 
@@ -216,5 +238,46 @@ describe.sequential('ServerInstallerService', () => {
     await setup();
     const res = await service.convert({ serverId: 'missing', flavor: 'paper' });
     expect(res.error).toContain('not found');
+  });
+
+  it('converts a server to forge, using the record javaPath for the installer', { timeout: 30000 }, async () => {
+    await setup();
+    const installId = await service.install({
+      flavor: 'vanilla',
+      name: 'Convert To Forge',
+      version: '1.21.1',
+      acceptEula: true,
+    });
+    await waitForProgress('complete');
+    const done = events.find((e) => e.progress.status === 'complete');
+    const serverId = done!.progress.serverId!;
+
+    // A fake "java" that creates the Forge server jar the installer would.
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'msc-convert-java-'));
+    const fakeJava = path.join(folder, 'fake-java.cmd');
+    fs.writeFileSync(
+      fakeJava,
+      [
+        '@echo off',
+        `node -e "require('node:fs').writeFileSync(process.argv[1], 'x')" forge-1.21.1-52.0.57.jar`,
+        '',
+      ].join('\r\n'),
+    );
+    try {
+      db.updateServer(serverId, { javaPath: fakeJava });
+      events.length = 0;
+      const { operationId, error } = await service.convert({ serverId, flavor: 'forge' });
+      expect(error).toBeUndefined();
+      expect(operationId).toBeTruthy();
+      await waitForProgress('complete');
+      const record = db.getServer(serverId);
+      expect(record?.serverType).toBe('forge');
+      expect(fs.existsSync(path.join(record!.folderPath, 'forge-1.21.1-52.0.57.jar'))).toBe(true);
+      // Installer cleaned up; no temp dir left behind.
+      expect(fs.existsSync(path.join(record!.folderPath, 'forge-installer.jar'))).toBe(false);
+      expect(fs.existsSync(path.join(record!.folderPath, '.msc-convert'))).toBe(false);
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@msc/backend",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Local Fastify backend for the Minecraft Server Customizer.",
   "main": "dist/index.js",

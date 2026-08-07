@@ -252,6 +252,36 @@ rl.on('line', () => {});
 
     await waitFor(() => manager.runningServerId === null, 5000);
   });
+
+  it('tracks players from prefixed join lines in the same chunk as the Done line', async () => {
+    // Emulate a real Vanilla server (modern versions no longer print the
+    // periodic "There are N of a max of M players online" report, so the only
+    // signal is the prefixed join/leave lines). The Done seed and the first
+    // join land in the same stdout write, which previously dropped the delta
+    // because playerCount was still null when the join was processed.
+    const FAKE = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+process.stdout.write(
+  'Done (1.234s)! For help, type "help"\\n' +
+  '[21:12:00] [Server thread/INFO]: Steve joined the game\\n'
+);
+setTimeout(() => process.exit(0), 500);
+rl.on('line', () => {});
+`;
+    writeFakeServer();
+    fs.writeFileSync(path.join(tempDir, 'fake-server.js'), FAKE);
+    manager.start(makeServerConfig());
+
+    await waitFor(
+      () => manager.getStatus('test-server').stats.onlinePlayers.length === 1,
+      5000,
+    );
+    expect(manager.getStatus('test-server').stats.onlinePlayers).toEqual(['Steve']);
+    expect(manager.getStatus('test-server').stats.playerCount).toBe(1);
+
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
 });
 
 describe('parsePlayerCount', () => {
@@ -282,7 +312,13 @@ describe('parsePlayerName', () => {
     expect(parsePlayerName('Alex left the game')).toBe('Alex');
     expect(parsePlayerName('player_42 joined the game')).toBe('player_42');
     expect(parsePlayerName('Done (1.234s)!')).toBeNull();
-    expect(parsePlayerName('[21:12:00] [Server thread/INFO]: Steve joined the game')).toBeNull();
+    expect(parsePlayerName('')).toBeNull();
+  });
+
+  it('extracts the name from real prefixed server log lines', () => {
+    expect(parsePlayerName('[21:12:00] [Server thread/INFO]: Steve joined the game')).toBe('Steve');
+    expect(parsePlayerName('[21:12:05] [Server thread/INFO]: Alex left the game')).toBe('Alex');
+    expect(parsePlayerName('[21:12:00] [Server thread/WARN]: Steve left the game')).toBe('Steve');
   });
 });
 

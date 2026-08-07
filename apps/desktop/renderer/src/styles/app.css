@@ -1206,6 +1206,18 @@ section.page > .settings-list {
   line-height: 14px;
 }
 
+.flavor-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  line-height: 14px;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .status-badge.status-ok {
   color: var(--accent);
   border-color: var(--accent);

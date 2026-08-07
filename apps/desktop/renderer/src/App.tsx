@@ -247,6 +247,11 @@ export default function App(): React.JSX.Element {
             <header className="page-header">
               <h1>Dashboard</h1>
               <span className="page-edition muted">{selectedServer.name}</span>
+              {selectedServer.edition === 'java' && (
+                <span className={`flavor-badge flavor-${selectedServer.serverType}`}>
+                  {selectedServer.serverType}
+                </span>
+              )}
               {appInfo && <span className="page-version muted">v{appInfo.version}</span>}
               <PlayitIndicator />
             </header>

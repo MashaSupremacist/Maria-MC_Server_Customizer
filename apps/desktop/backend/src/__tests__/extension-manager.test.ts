@@ -196,6 +196,19 @@ describe('inspectJar', () => {
     });
   });
 
+  it('extracts META-INF/mods.toml metadata for Forge mods', async () => {
+    const jar = path.join(tempDir, 'forge-mod.jar');
+    await makeForgeJar(jar);
+    const meta = await inspectJar(jar, 'forge');
+    expect(meta).toMatchObject({
+      displayName: 'Forge Test Mod',
+      version: '1.2.3',
+      kind: 'mod',
+      authors: ['Tester'],
+      dependencies: expect.arrayContaining(['minecraft']),
+    });
+  });
+
   it('returns null for a non-mod jar', async () => {
     const jar = path.join(tempDir, 'empty.jar');
     fs.writeFileSync(jar, 'not a zip');
@@ -203,3 +216,34 @@ describe('inspectJar', () => {
     expect(meta).toBeNull();
   });
 });
+
+/** Build a minimal Forge mod jar with META-INF/mods.toml. */
+function makeForgeJar(filePath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const zip = new yazl.ZipFile();
+    const toml = [
+      'modLoader="javafml"',
+      'loaderVersion="[47,)"',
+      'license="MIT"',
+      '',
+      '[[mods]]',
+      'modId="forgetest"',
+      'version="1.2.3"',
+      'displayName="Forge Test Mod"',
+      'description="A forge test mod"',
+      'authors="Tester"',
+      '',
+      '[[dependencies.forgetest]]',
+      'modId="minecraft"',
+      'type="required"',
+      'versionRange="[1.21,)"',
+      '',
+    ].join('\n');
+    zip.addBuffer(Buffer.from(toml), 'META-INF/mods.toml');
+    const output = fs.createWriteStream(filePath);
+    output.on('error', reject);
+    output.on('close', resolve);
+    zip.outputStream.pipe(output);
+    zip.end();
+  });
+}

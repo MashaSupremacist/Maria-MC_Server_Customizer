@@ -29,6 +29,8 @@ import {
   type JavaProgress,
   type JavaRequirement,
   type LogLine,
+  type ModpackImportRequest,
+  type ModpackImportResult,
   type PackKind,
   type PackListResponse,
   type PlayerListEntry,
@@ -388,6 +390,26 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle(
+    IpcChannels.selectModpack,
+    async (): Promise<FolderSelectResult> => {
+      const options: Electron.OpenDialogOptions = {
+        title: 'Select a modpack (.mrpack or .zip)',
+        properties: ['openFile'],
+        filters: [
+          { name: 'Modpack', extensions: ['mrpack', 'zip'] },
+        ],
+      };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+      if (result.canceled || result.filePaths.length === 0) {
+        return { path: null, canceled: true };
+      }
+      return { path: result.filePaths[0], canceled: false };
+    },
+  );
+
+  ipcMain.handle(
     IpcChannels.openServerFolder,
     async (_event, folderPath: string): Promise<ShellOpenResult> => {
       try {
@@ -723,6 +745,17 @@ function registerIpcHandlers(): void {
         `/servers/${encodeURIComponent(serverId)}/extensions/delete`,
         { name },
       )) as { ok: boolean; error?: string };
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.importModpack,
+    async (_event, request: ModpackImportRequest): Promise<ModpackImportResult> => {
+      return (await backendFetch(
+        'POST',
+        `/servers/${encodeURIComponent(request.serverId)}/modpack-import`,
+        { filePath: request.filePath, force: request.force },
+      )) as ModpackImportResult;
     },
   );
 

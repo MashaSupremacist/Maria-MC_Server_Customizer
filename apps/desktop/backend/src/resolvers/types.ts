@@ -30,6 +30,8 @@ export interface FlavorResolver {
     serverFolder: string;
     loaderVersion?: string;
     forgeBuild?: string;
+    /** A configured java.exe to use (falls back to JAVA_HOME / PATH). */
+    javaPath?: string | null;
   }): Promise<void>;
 }
 

@@ -93,6 +93,8 @@ export const IpcChannels = {
   enableExtension: 'extensions:enable',
   disableExtension: 'extensions:disable',
   deleteExtension: 'extensions:delete',
+  selectModpack: 'modpack:select',
+  importModpack: 'modpack:import',
   getBedrockVersions: 'bedrock:versions',
   installBedrockServer: 'bedrock:install',
   cancelBedrockInstall: 'bedrock:install:cancel',
@@ -324,6 +326,27 @@ export interface ExtensionListResponse {
   /** Folder name, e.g. "mods" or "plugins". */
   folder: string | null;
   entries: ExtensionEntry[];
+}
+
+/** Request to import a modpack (.mrpack / .zip) onto an existing server. */
+export interface ModpackImportRequest {
+  serverId: string;
+  /** Absolute path to the pack file (chosen via the native file dialog). */
+  filePath: string;
+  /** Bypass the loader/MC version match check. */
+  force?: boolean;
+}
+
+/** Result of a modpack import. */
+export interface ModpackImportResult {
+  ok: boolean;
+  error?: string;
+  /** Number of mod JARs added to mods/. */
+  modsAdded: number;
+  /** Number of non-mod files copied into the server folder. */
+  filesCopied: number;
+  /** Number of files skipped (server state / excluded paths). */
+  skipped: number;
 }
 
 /** Progress of a server installation. */

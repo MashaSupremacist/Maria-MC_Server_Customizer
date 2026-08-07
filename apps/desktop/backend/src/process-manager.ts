@@ -47,10 +47,12 @@ export function findServerJar(
   }
   if (flavor === 'forge') {
     // Forge generates forge-<mc>-<build>.jar (the installer is removed).
+    // A -shim.jar launcher may also exist; prefer the real server jar.
     const forgeJars = fs
       .readdirSync(folderPath)
       .filter((f) => f.startsWith('forge-') && f.endsWith('.jar') && f !== 'forge-installer.jar');
-    return forgeJars.length > 0 ? path.join(folderPath, forgeJars[0]) : null;
+    const real = forgeJars.find((f) => !f.includes('-shim.'));
+    return real ? path.join(folderPath, real) : forgeJars.length > 0 ? path.join(folderPath, forgeJars[0]) : null;
   }
   if (flavor === 'paper') {
     const paperJars = fs
@@ -222,10 +224,22 @@ export class ProcessManager {
     this.startStatsTimer(child.pid);
 
     child.stdout?.on('data', (chunk: Buffer) => {
-      for (const line of splitLines(chunk.toString())) {
+      const lines = splitLines(chunk.toString());
+      const isBedrock = edition === 'bedrock';
+      // If this chunk carries the online seed line, seed the baseline BEFORE
+      // processing deltas. The seed and a join/leave can land in the same
+      // stdout chunk; without the up-front seed the delta is silently dropped
+      // because playerCount is still null.
+      const chunkHasSeed = lines.some((l) =>
+        isBedrock ? isBedrockOnlineLine(l) : isOnlineLine(l),
+      );
+      if (chunkHasSeed && this.stats.playerCount === null) {
+        this.stats = { ...this.stats, playerCount: 0 };
+        this.emitStats();
+      }
+      for (const line of lines) {
         if (!line) continue;
         this.pushLog(line, classifyLine(line));
-        const isBedrock = edition === 'bedrock';
         const playerCount = isBedrock ? null : parsePlayerCount(line);
         if (playerCount !== null) {
           // Full player-count report: refresh the tracked names when the
@@ -466,10 +480,18 @@ export function parsePlayerList(line: string): string[] | null {
     .filter(Boolean);
 }
 
-/** Extract the player name from a join/leave line, or null. */
+/**
+ * Extract the player name from a join/leave line, or null. Accepts both bare
+ * lines (test fakes) and real server output that carries the standard prefix
+ * ("[12:00:01] [Server thread/INFO]: Steve joined the game").
+ */
 export function parsePlayerName(line: string): string | null {
   const match = line.match(/^([A-Za-z0-9_]{1,16}) (?:joined the game|left the game)/);
-  return match ? match[1] : null;
+  if (match) return match[1];
+  const prefixed = line.match(
+    /^\[\d{2}:\d{2}:\d{2}\] \[[^\]]+\/(?:INFO|WARN|ERROR)\]:\s*([A-Za-z0-9_]{1,16}) (?:joined the game|left the game)/,
+  );
+  return prefixed ? prefixed[1] : null;
 }
 
 /** Detect a player join/leave line; returns +1/-1 delta or null. */

@@ -217,7 +217,13 @@ export class ServerInstallerService {
       // 4. Flavor install step (e.g. Forge --installServer).
       if (resolver.installStep) {
         this.emit(installId, { status: 'installing', percent: null, message: 'Running server installer…' });
-        await resolver.installStep({ version: request.version, serverFolder, loaderVersion: request.loaderVersion, forgeBuild: request.forgeBuild });
+        await resolver.installStep({
+          version: request.version,
+          serverFolder,
+          loaderVersion: request.loaderVersion,
+          forgeBuild: request.forgeBuild,
+          javaPath: request.javaPath ?? null,
+        });
         if (isCanceled()) {
           this.cleanupFolder(serverFolder);
           this.finish(installId, 'canceled', 'Installation canceled');
@@ -280,6 +286,8 @@ export class ServerInstallerService {
   ): Promise<void> {
     const entry = this.installs.get(operationId);
     const isCanceled = (): boolean => entry?.cancelRequested ?? false;
+    const tempDir = path.join(serverFolder, '.msc-convert');
+    let movedJars: string[] = [];
     try {
       const resolver = this.resolvers[request.flavor];
       if (!resolver) throw new Error(`Unknown server type: ${request.flavor}`);
@@ -287,7 +295,7 @@ export class ServerInstallerService {
       // Download the new flavor's artifacts into a temp dir, then swap in.
       const record = this.db.getServer(request.serverId);
       const mcVersion = record?.version ?? '';
-      const tempDir = path.join(serverFolder, '.msc-convert');
+      const javaPath = record?.javaPath ?? null;
       fs.mkdirSync(tempDir, { recursive: true });
       const downloads = await resolver.resolveDownloads({
         version: mcVersion,
@@ -319,6 +327,7 @@ export class ServerInstallerService {
         const target = path.join(serverFolder, name);
         fs.rmSync(target, { force: true });
         fs.renameSync(path.join(tempDir, name), target);
+        movedJars.push(name);
       }
       this.cleanupFolder(tempDir);
 
@@ -326,10 +335,11 @@ export class ServerInstallerService {
       if (resolver.installStep) {
         this.emit(operationId, { status: 'installing', percent: null, message: 'Running server installer…' });
         await resolver.installStep({
-          version: this.db.getServer(request.serverId)?.version ?? '',
+          version: mcVersion,
           serverFolder,
           loaderVersion: request.loaderVersion,
           forgeBuild: request.forgeBuild,
+          javaPath,
         });
       }
 
@@ -343,6 +353,16 @@ export class ServerInstallerService {
         message: 'Server type converted',
       });
     } catch (err) {
+      // Roll back the swapped-in jars so the server is not left in a broken
+      // half-converted state, and drop the temp dir.
+      this.cleanupFolder(tempDir);
+      for (const name of movedJars) {
+        try {
+          fs.rmSync(path.join(serverFolder, name), { force: true });
+        } catch {
+          // best effort
+        }
+      }
       this.installs.delete(operationId);
       this.emit(operationId, {
         status: 'failed',
@@ -409,13 +429,16 @@ export class ServerInstallerService {
           }
         }
         if (!file.write(Buffer.from(value))) {
-          await new Promise<void>((resolve) => file.once('drain', resolve));
+          await new Promise<void>((resolve, reject) => {
+            file.once('drain', resolve);
+            file.once('error', reject);
+          });
         }
       }
+      file.end();
       await new Promise<void>((resolve, reject) => {
         file.once('finish', resolve);
         file.once('error', reject);
-        file.end();
       });
     } catch (err) {
       file.destroy();
