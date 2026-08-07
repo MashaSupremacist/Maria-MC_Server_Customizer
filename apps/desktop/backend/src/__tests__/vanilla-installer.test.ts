@@ -79,12 +79,14 @@ describe.sequential('VanillaInstallerService', () => {
   let library: string;
   let fakeMojang: { baseUrl: string; server: Server; jarSha1: string };
   const events: Array<{ installId: string; progress: unknown }> = [];
+  let onProgress: ((installId: string, status?: string) => void) | null = null;
 
   afterEach(() => {
     fakeMojang.server.close();
     db.close();
     fs.rmSync(dataDir, { recursive: true, force: true });
     events.length = 0;
+    onProgress = null;
   });
 
   async function setup(opts: { badSha1?: boolean } = {}): Promise<VanillaInstallerService> {
@@ -98,6 +100,7 @@ describe.sequential('VanillaInstallerService', () => {
     return new VanillaInstallerService(db, (event) => {
       if (event.type === 'install:progress') {
         events.push({ installId: event.installId, progress: event.progress });
+        onProgress?.(event.installId, event.progress.status);
       }
     }, {
       fetchImpl,
@@ -183,23 +186,24 @@ describe.sequential('VanillaInstallerService', () => {
 
   it('cancels a download and removes partial files', async () => {
     const installer = await setup();
-    const installId = await installer.install({
+    let cancellationAccepted = false;
+    onProgress = (installId, status) => {
+      if (status !== 'downloading') return;
+      cancellationAccepted = installer.cancel(installId);
+      onProgress = null;
+    };
+
+    await installer.install({
       name: 'Cancel Me',
       version: '1.21.4',
       acceptEula: true,
     });
 
-    // Cancel almost immediately; the download is tiny so this races, but
-    // cancellation is honored at the next checkpoint.
-    await new Promise((r) => setTimeout(r, 10));
-    const canceled = installer.cancel(installId);
-    expect(canceled).toBe(true);
+    await waitForProgress('canceled', 3000);
+    expect(cancellationAccepted).toBe(true);
 
-    // Wait for either canceled or complete (whichever wins the race).
-    await waitForProgress('complete', 2000).catch(() => undefined);
-    await waitForProgress('canceled', 3000).catch(() => undefined);
-
-    // No server record should exist if it was canceled.
+    // No server record or partial server folder should survive cancellation.
     expect(db.listServers()).toHaveLength(0);
+    expect(fs.readdirSync(library)).toHaveLength(0);
   });
 });

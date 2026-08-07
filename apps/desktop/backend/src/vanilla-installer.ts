@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { finished } from 'node:stream/promises';
 import type {
   InstallProgress,
   InstallVanillaRequest,
@@ -134,6 +135,7 @@ export class VanillaInstallerService {
     request: InstallVanillaRequest,
     cancel: () => boolean,
   ): Promise<void> {
+    let serverFolder: string | null = null;
     try {
       const entry = this.installs.get(installId);
       const isCanceled = (): boolean => entry?.cancelRequested ?? false;
@@ -151,7 +153,7 @@ export class VanillaInstallerService {
       }
 
       // 2. Create the server folder.
-      const serverFolder = this.createServerFolder(request.name, request.folderName);
+      serverFolder = this.createServerFolder(request.name, request.folderName);
       if (isCanceled()) {
         this.cleanupFolder(serverFolder);
         this.finish(installId, 'canceled', 'Installation canceled');
@@ -225,6 +227,9 @@ export class VanillaInstallerService {
       });
     } catch (err) {
       this.installs.delete(installId);
+      if (serverFolder) {
+        this.cleanupFolder(serverFolder);
+      }
       if (err instanceof DownloadCanceledError) {
         this.emit(installId, {
           status: 'canceled',
@@ -313,10 +318,13 @@ export class VanillaInstallerService {
     let lastMbMarker = 0;
     const reader = res.body.getReader();
     const file = fs.createWriteStream(dest);
+    const fileFinished = finished(file);
+    // Keep an error handler attached while the response body is being read;
+    // the awaited promise below still propagates the failure.
+    void fileFinished.catch(() => undefined);
     try {
       for (;;) {
         if (isCanceled()) {
-          file.destroy();
           throw new DownloadCanceledError();
         }
         const { done, value } = await reader.read();
@@ -337,8 +345,21 @@ export class VanillaInstallerService {
           await new Promise<void>((resolve) => file.once('drain', resolve));
         }
       }
-    } finally {
       file.end();
+      await fileFinished;
+    } catch (err) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The response may already be closed.
+      }
+      file.destroy();
+      try {
+        await fileFinished;
+      } catch {
+        // Preserve the original download/cancellation error.
+      }
+      throw err;
     }
   }
 }
