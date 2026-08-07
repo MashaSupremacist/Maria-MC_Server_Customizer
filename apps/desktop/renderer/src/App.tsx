@@ -3,8 +3,7 @@ import { type AppInfo, type Edition, type ServerRecord } from '@msc/shared-types
 import TitleBar from './components/TitleBar';
 import Sidebar, { type NavItem } from './components/Sidebar';
 import PlaceholderPage from './components/PlaceholderPage';
-import ServerForm from './components/ServerForm';
-import BedrockServerForm from './components/BedrockServerForm';
+import CreateServerView from './components/CreateServerView';
 import ServerControls from './components/ServerControls';
 import DashboardStats from './components/DashboardStats';
 import ConsolePage from './components/ConsolePage';
@@ -21,6 +20,7 @@ import PermissionsPage from './components/PermissionsPage';
 import PackPage from './components/PackPage';
 import DeleteServerDialog from './components/DeleteServerDialog';
 import UpdateBanner from './components/UpdateBanner';
+import EmptyStatePanel from './components/EmptyStatePanel';
 import { useServerRuntime } from './hooks/useServerRuntime';
 import { useVanillaInstall } from './hooks/useVanillaInstall';
 import { useBedrockInstall } from './hooks/useBedrockInstall';
@@ -61,17 +61,15 @@ export default function App(): React.JSX.Element {
   const [libraryPath, setLibraryPath] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
+  /** Last java.exe used, persisted in settings; pre-filled for new servers. */
+  const [lastJavaPath, setLastJavaPath] = useState<string | null>(null);
+  /** True when the "add server" create view is shown, even if servers exist. */
+  const [addingServer, setAddingServer] = useState(false);
 
   const selectedServer = servers.find((s) => s.id === selectedId) ?? null;
   const runtime = useServerRuntime(selectedId);
-  const install = useVanillaInstall((server) => {
-    setServers((prev) => [...prev, server]);
-    setSelectedId(server.id);
-  });
-  const bedrockInstall = useBedrockInstall((server) => {
-    setServers((prev) => [...prev, server]);
-    setSelectedId(server.id);
-  });
+  const install = useVanillaInstall((server) => handleServerCreated(server));
+  const bedrockInstall = useBedrockInstall((server) => handleServerCreated(server));
 
   useEffect(() => {
     let cancelled = false;
@@ -89,6 +87,7 @@ export default function App(): React.JSX.Element {
       .then(([settings, list]) => {
         if (cancelled) return;
         setLibraryPath(settings.serverLibraryPath);
+        setLastJavaPath(settings.lastJavaPath);
         setServers(list);
         if (list.length > 0 && !selectedId) {
           setSelectedId(list[0].id);
@@ -110,6 +109,7 @@ export default function App(): React.JSX.Element {
   const handleEditionChange = (next: Edition): void => {
     setEdition(next);
     setActivePage('dashboard');
+    setAddingServer(false);
   };
 
   const handleSelectLibrary = async (): Promise<void> => {
@@ -121,6 +121,23 @@ export default function App(): React.JSX.Element {
       setLibraryError(null);
     } catch (err) {
       setLibraryError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** Shared by install + add-existing: append, select, and exit the add view. */
+  const handleServerCreated = (server: ServerRecord): void => {
+    // Dedupe by id: the install hooks can fire onCreated more than once
+    // (React StrictMode double-mounts the WS subscription in dev), so never
+    // append a server that's already in the list.
+    setServers((prev) => (prev.some((s) => s.id === server.id) ? prev : [...prev, server]));
+    setSelectedId(server.id);
+    setAddingServer(false);
+    // Remember the chosen java.exe for the next server.
+    if (server.edition === 'java' && server.javaPath) {
+      setLastJavaPath(server.javaPath);
+      void api.setLastJavaPath(server.javaPath).catch(() => {
+        // Non-fatal: the next server just won't be pre-filled.
+      });
     }
   };
 
@@ -157,7 +174,33 @@ export default function App(): React.JSX.Element {
     setSelectedId((prev) => (prev && list.some((s) => s.id === prev) ? prev : (list[0]?.id ?? null)));
   };
 
+  const handleNavigate = (page: string): void => {
+    setActivePage(page);
+    setAddingServer(false);
+  };
+
+  const pageTitle = (page: string): string => {
+    const item = nav.find((n) => n.page === page);
+    return item ? item.label : page;
+  };
+
   const renderContent = (): React.JSX.Element => {
+    // "Add server" view: shown even when servers exist (from the picker button).
+    if (addingServer) {
+      return (
+        <CreateServerView
+          edition={edition}
+          appInfo={appInfo}
+          libraryPath={libraryPath}
+          libraryError={libraryError}
+          lastJavaPath={lastJavaPath}
+          install={install}
+          bedrockInstall={bedrockInstall}
+          onSelectLibrary={handleSelectLibrary}
+          onCreated={handleServerCreated}
+        />
+      );
+    }
     // Pages that need a selected server.
     if (selectedServer) {
       if (activePage === 'console') {
@@ -170,7 +213,7 @@ export default function App(): React.JSX.Element {
         return <GamerulesPage server={selectedServer} />;
       }
       if (activePage === 'players') {
-        return <PlayersPage server={selectedServer} />;
+        return <PlayersPage server={selectedServer} runtime={runtime} />;
       }
       if (activePage === 'worlds') {
         return <WorldsPage server={selectedServer} />;
@@ -254,61 +297,45 @@ export default function App(): React.JSX.Element {
       }
       // No server yet: show library + create form.
       return (
-        <section className="page">
-          <header className="page-header">
-            <h1>Dashboard</h1>
-            <span className="page-edition muted">
-              {edition === 'java' ? 'Java Edition' : 'Bedrock Edition'}
-            </span>
-            {appInfo && <span className="page-version muted">v{appInfo.version}</span>}
-          </header>
-          <div className="panel panel-stretch">
-            <h2 className="panel-title">Server Library</h2>
-            <div className="dash-row dash-row-column">
-              <span className="muted">Where server instances are stored</span>
-              <span className="path-text">{libraryPath ?? 'Not set'}</span>
-            </div>
-            <div className="dash-row">
-              <button type="button" className="btn" onClick={() => void handleSelectLibrary()}>
-                {libraryPath ? 'Change Folder' : 'Select Folder'}
-              </button>
-            </div>
-            {libraryError && <div className="error-banner">{libraryError}</div>}
-          </div>
-          {libraryPath ? (
-            <div className="panel-stretch">
-              {edition === 'java' ? (
-                <ServerForm
-                  libraryPath={libraryPath}
-                  install={install}
-                  onCreated={(server) => {
-                    setServers((prev) => [...prev, server]);
-                    setSelectedId(server.id);
-                  }}
-                />
-              ) : (
-                <BedrockServerForm
-                  libraryPath={libraryPath}
-                  install={bedrockInstall}
-                  onCreated={(server) => {
-                    setServers((prev) => [...prev, server]);
-                    setSelectedId(server.id);
-                  }}
-                />
-              )}
-            </div>
-          ) : (
-            <p className="muted panel-stretch">Choose a library folder to create servers.</p>
-          )}
-        </section>
+        <CreateServerView
+          edition={edition}
+          appInfo={appInfo}
+          libraryPath={libraryPath}
+          libraryError={libraryError}
+          lastJavaPath={lastJavaPath}
+          install={install}
+          bedrockInstall={bedrockInstall}
+          onSelectLibrary={handleSelectLibrary}
+          onCreated={handleServerCreated}
+        />
+      );
+    }
+    // A server-required page with no server: explain + offer to add one.
+    if (activePage === 'datapacks') {
+      // Datapacks is genuinely not implemented yet — keep the placeholder.
+      return (
+        <PlaceholderPage
+          pageId={activePage}
+          edition={edition}
+          appVersion={appInfo?.version}
+        />
       );
     }
     return (
-      <PlaceholderPage
-        pageId={activePage}
-        edition={edition}
-        appVersion={appInfo?.version}
-      />
+      <section className="page">
+        <header className="page-header">
+          <h1>{pageTitle(activePage)}</h1>
+          <span className="page-edition muted">
+            {edition === 'java' ? 'Java Edition' : 'Bedrock Edition'}
+          </span>
+          {appInfo && <span className="page-version muted">v{appInfo.version}</span>}
+        </header>
+        <EmptyStatePanel
+          edition={edition}
+          pageTitle={pageTitle(activePage)}
+          onAddServer={() => setAddingServer(true)}
+        />
+      </section>
     );
   };
 
@@ -320,8 +347,12 @@ export default function App(): React.JSX.Element {
           edition={edition}
           nav={nav}
           activePage={activePage}
+          selectedServerName={selectedServer?.name ?? null}
           onEditionChange={handleEditionChange}
-          onNavigate={setActivePage}
+          onNavigate={handleNavigate}
+          onAddServer={() => {
+            setAddingServer(true);
+          }}
         />
         <main className="content">
           <UpdateBanner />
@@ -333,7 +364,10 @@ export default function App(): React.JSX.Element {
                     type="button"
                     className={`server-chip${selectedId === server.id ? ' active' : ''}${server.folderExists ? '' : ' chip-missing'}`}
                     title={server.folderExists ? server.name : `${server.name} (folder missing on disk)`}
-                    onClick={() => setSelectedId(server.id)}
+                    onClick={() => {
+                      setSelectedId(server.id);
+                      setAddingServer(false);
+                    }}
                   >
                     <span className={`chip-edition chip-edition-${server.edition}`}>
                       {server.edition}
@@ -351,6 +385,16 @@ export default function App(): React.JSX.Element {
                   </button>
                 </div>
               ))}
+              <button
+                type="button"
+                className="server-chip server-chip-add"
+                title="Add another server"
+                onClick={() => {
+                  setAddingServer(true);
+                }}
+              >
+                + Add {edition === 'java' ? 'Java' : 'Bedrock'} Server
+              </button>
             </div>
           )}
           {install.install.phase === 'installing' && (

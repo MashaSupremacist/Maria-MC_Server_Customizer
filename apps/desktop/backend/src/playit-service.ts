@@ -12,6 +12,8 @@ import type { DatabaseResult } from './db';
 import type { WsBroadcast } from './world-service';
 
 const LOG_LIMIT = 500;
+/** After this long in "starting" with a live process, treat Playit as online. */
+const ONLINE_GRACE_MS = 5000;
 
 /**
  * Manages the Playit agent process (one at a time). Detects setup/claim links
@@ -32,6 +34,7 @@ export class PlayitService {
   private logs: LogLine[] = [];
   private links: PlayitLink[] = [];
   private detectedAddress: string | null = null;
+  private onlineTimer: NodeJS.Timeout | null = null;
 
   constructor(db: DatabaseResult, broadcast: WsBroadcast) {
     this.db = db;
@@ -123,9 +126,22 @@ export class PlayitService {
     this.logs = [];
     this.links = [];
     this.detectedAddress = null;
+    this.clearOnlineTimer();
     this.setState('starting');
 
     this.pushLog(`Starting Playit: ${playitPath}`);
+
+    // Fallback: some agent versions never print a "tunnel ready" style line
+    // after startup, so if the process stays alive past the grace period we
+    // treat it as online (running). The process-alive check keeps this from
+    // firing for a process that died silently before the timer elapses.
+    this.onlineTimer = setTimeout(() => {
+      this.onlineTimer = null;
+      if (this.child && this.state === 'starting') {
+        this.pushLog('Playit process is up; marking online', 'info');
+        this.setState('online');
+      }
+    }, ONLINE_GRACE_MS);
 
     // Run playit with a TTY-ish context in mind; the agent writes setup links
     // to stdout when it is not yet claimed. windowsHide keeps the console
@@ -147,37 +163,29 @@ export class PlayitService {
     child.stdout?.on('data', (chunk: Buffer) => {
       for (const line of splitLines(chunk.toString())) {
         if (!line) continue;
-        this.pushLog(line, classifyLine(line));
-        const link = findSetupLink(line);
-        if (link) {
-          // Keep the newest link first, dedupe, cap the list.
-          this.links = [link, ...this.links.filter((l) => l.url !== link.url)].slice(0, 5);
-        }
-        const address = findPublicAddress(line);
-        if (address) {
-          this.detectedAddress = address;
-        }
-        if (isOnlineLine(line)) {
-          this.setState('online');
-        }
+        this.handleOutputLine(line);
       }
     });
 
     child.stderr?.on('data', (chunk: Buffer) => {
       for (const line of splitLines(chunk.toString())) {
         if (!line) continue;
-        this.pushLog(line, 'warn');
+        // Rust tools (playitd) write their INFO logs to stderr — treat it as
+        // a first-class output stream so online/claim/address detection works.
+        this.handleOutputLine(line, 'warn');
       }
     });
 
     child.on('error', (err) => {
       this.pushLog(`Process error: ${err.message}`, 'error');
       this.child = null;
+      this.clearOnlineTimer();
       this.setState('crashed', 1);
     });
 
     child.on('exit', (code, signal) => {
       this.child = null;
+      this.clearOnlineTimer();
       const exitCode = code ?? (signal ? 1 : null);
       this.pushLog(`Playit exited (code ${exitCode})`, 'info');
 
@@ -241,12 +249,42 @@ export class PlayitService {
 
   /** Ensure the managed process is stopped when the backend shuts down. */
   shutdown(): void {
+    this.clearOnlineTimer();
     if (this.child) {
       this.pushLog('Backend shutting down; stopping Playit', 'warn');
       this.killChild(this.child);
     }
     this.child = null;
     this.state = 'offline';
+  }
+
+  private clearOnlineTimer(): void {
+    if (this.onlineTimer) {
+      clearTimeout(this.onlineTimer);
+      this.onlineTimer = null;
+    }
+  }
+
+  /**
+   * Process one output line from the agent (stdout or stderr): log it,
+   * watch for setup links + public addresses, and flip to online when the
+   * daemon reports it is up.
+   */
+  private handleOutputLine(line: string, level?: LogLine['level']): void {
+    this.pushLog(line, level ?? classifyLine(line));
+    const link = findSetupLink(line);
+    if (link) {
+      // Keep the newest link first, dedupe, cap the list.
+      this.links = [link, ...this.links.filter((l) => l.url !== link.url)].slice(0, 5);
+    }
+    const address = findPublicAddress(line);
+    if (address) {
+      this.detectedAddress = address;
+    }
+    if (isOnlineLine(line)) {
+      this.clearOnlineTimer();
+      this.setState('online');
+    }
   }
 
   private setState(state: PlayitState, exitCode: number | null = null): void {
@@ -292,7 +330,7 @@ export function findPublicAddress(line: string): string | null {
 
 function isOnlineLine(line: string): boolean {
   return (
-    /tunnel established|tunnel ready|connected|Starting playitd daemon|playitd::daemon|agent: (tunnel|connected)/i.test(
+    /tunnel established|tunnel ready|connected|Starting playitd daemon|playitd::daemon|playitd::ui|agent: (tunnel|connected)|tunnel running/i.test(
       line,
     ) || /Secret found/i.test(line)
   );

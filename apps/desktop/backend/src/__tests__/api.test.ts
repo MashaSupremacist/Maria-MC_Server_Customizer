@@ -137,6 +137,79 @@ describe('backend API', () => {
     });
   });
 
+  describe('servers detect', () => {
+    it('requires a token', async () => {
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers/detect',
+        payload: { folderPath: path.join(dataDir, 'x') },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('returns edition + serverType for a folder with server.jar', async () => {
+      const serverDir = path.join(dataDir, 'detect-vanilla');
+      fs.mkdirSync(serverDir, { recursive: true });
+      fs.writeFileSync(path.join(serverDir, 'server.jar'), 'x');
+
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers/detect',
+        headers: authHeaders,
+        payload: { folderPath: serverDir },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        path: serverDir,
+        edition: 'java',
+        serverType: 'vanilla',
+      });
+    });
+
+    it('detects a bedrock folder', async () => {
+      const serverDir = path.join(dataDir, 'detect-bedrock');
+      fs.mkdirSync(serverDir, { recursive: true });
+      fs.writeFileSync(path.join(serverDir, 'bedrock_server.exe'), 'x');
+
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers/detect',
+        headers: authHeaders,
+        payload: { folderPath: serverDir },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        path: serverDir,
+        edition: 'bedrock',
+        serverType: 'bedrock',
+      });
+    });
+
+    it('returns nulls for an empty folder', async () => {
+      const dir = path.join(dataDir, 'detect-empty');
+      fs.mkdirSync(dir, { recursive: true });
+
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers/detect',
+        headers: authHeaders,
+        payload: { folderPath: dir },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ path: dir, edition: null, serverType: null });
+    });
+
+    it('rejects a missing folderPath', async () => {
+      const res = await getApp().inject({
+        method: 'POST',
+        url: '/servers/detect',
+        headers: authHeaders,
+        payload: {},
+      });
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
   describe('settings', () => {
     it('persists the server library path and survives a re-open', async () => {
       const libPath = path.join(dataDir, 'library');

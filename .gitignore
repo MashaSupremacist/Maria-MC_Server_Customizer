@@ -30,6 +30,10 @@ data/
 # Local scratch script
 _check.cjs
 
+# Private local project notes (never publish)
+/PROJECT_PROGRESS.md
+/MINECRAFT_SERVER_CUSTOMIZER_PLAN.md
+
 # Umbrella-repo leftovers
 $null
 r.name).join('

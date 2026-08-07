@@ -72,7 +72,7 @@ Uninstalling the desktop application does not automatically delete that server d
 Every GitHub Release includes `SHA256SUMS.txt`. From Git Bash, compare the published checksum with your download:
 
 ```sh
-sha256sum "Minecraft.Server.Customizer-Portable-0.1.0.exe"
+sha256sum "Minecraft.Server.Customizer-Portable-0.2.0.exe"
 ```
 
 ## Development
@@ -140,8 +140,8 @@ scripts/
 Pushing a version tag runs the Windows release workflow. It type-checks, tests, builds, packages, computes SHA-256 checksums, and attaches the installer and portable downloads to a GitHub Release.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 ## Security model

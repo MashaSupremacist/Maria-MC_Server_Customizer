@@ -7,8 +7,11 @@ import {
   findServerJar,
   isBedrockOnlineLine,
   parseBedrockPlayerDelta,
+  parseBedrockPlayerName,
   parsePlayerCount,
   parsePlayerDelta,
+  parsePlayerList,
+  parsePlayerName,
   ProcessManager,
   type ServerConfig,
 } from '../process-manager';
@@ -220,6 +223,35 @@ describe('ProcessManager', () => {
     manager.stop();
     await waitFor(() => manager.runningServerId === null, 5000);
   });
+
+  it('tracks online player names from join/leave lines', async () => {
+    const FAKE = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+console.log('Done (1.234s)! For help, type "help"');
+setTimeout(() => console.log('Steve joined the game'), 100);
+setTimeout(() => console.log('Alex joined the game'), 200);
+setTimeout(() => console.log('Steve left the game'), 300);
+setTimeout(() => process.exit(0), 500);
+rl.on('line', () => {});
+`;
+    writeFakeServer();
+    fs.writeFileSync(path.join(tempDir, 'fake-server.js'), FAKE);
+    manager.start(makeServerConfig());
+
+    await waitFor(() => manager.getStatus('test-server').stats.onlinePlayers.length === 2);
+    expect(manager.getStatus('test-server').stats.onlinePlayers).toEqual(['Steve', 'Alex']);
+    expect(manager.getStatus('test-server').stats.playerCount).toBe(2);
+
+    await waitFor(
+      () => manager.getStatus('test-server').stats.onlinePlayers.length === 1,
+      5000,
+    );
+    expect(manager.getStatus('test-server').stats.onlinePlayers).toEqual(['Alex']);
+    expect(manager.getStatus('test-server').stats.playerCount).toBe(1);
+
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
 });
 
 describe('parsePlayerCount', () => {
@@ -241,6 +273,52 @@ describe('parsePlayerDelta', () => {
     expect(parsePlayerDelta('Alex left the game')).toBe(-1);
     expect(parsePlayerDelta('Done (1.234s)!')).toBeNull();
     expect(parsePlayerDelta('')).toBeNull();
+  });
+});
+
+describe('parsePlayerName', () => {
+  it('extracts the player name from join/leave lines', () => {
+    expect(parsePlayerName('Steve joined the game')).toBe('Steve');
+    expect(parsePlayerName('Alex left the game')).toBe('Alex');
+    expect(parsePlayerName('player_42 joined the game')).toBe('player_42');
+    expect(parsePlayerName('Done (1.234s)!')).toBeNull();
+    expect(parsePlayerName('[21:12:00] [Server thread/INFO]: Steve joined the game')).toBeNull();
+  });
+});
+
+describe('parsePlayerList', () => {
+  it('parses names from a full player-count report', () => {
+    expect(parsePlayerList('There are 2 of a max of 20 players online: Steve, Alex')).toEqual([
+      'Steve',
+      'Alex',
+    ]);
+    expect(parsePlayerList('There are 1 of a max of 20 players online: Steve')).toEqual(['Steve']);
+    expect(parsePlayerList('There are 3 of a max of 20 players online: a, b, c')).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
+  });
+
+  it('returns an empty list when the report lists nobody', () => {
+    expect(parsePlayerList('There are 0 of a max of 20 players online:')).toEqual([]);
+  });
+
+  it('returns null when no names are listed (modern report omits them)', () => {
+    expect(parsePlayerList('There are 0 of a max of 20 players online')).toBeNull();
+  });
+
+  it('returns null for unrelated lines', () => {
+    expect(parsePlayerList('Done (1.234s)!')).toBeNull();
+    expect(parsePlayerList('')).toBeNull();
+  });
+});
+
+describe('parseBedrockPlayerName', () => {
+  it('extracts the name from Bedrock connect/disconnect lines', () => {
+    expect(parseBedrockPlayerName('Player connected: Steve, xuid: 123')).toBe('Steve');
+    expect(parseBedrockPlayerName('Player disconnected: Alex, xuid: 456')).toBe('Alex');
+    expect(parseBedrockPlayerName('Server started.')).toBeNull();
   });
 });
 
@@ -380,6 +458,38 @@ describe('Bedrock ProcessManager', () => {
   it('fails with missing-executable when bedrock_server.exe is absent', () => {
     const err = manager.start(bedrockConfig());
     expect(err?.code).toBe('missing-executable');
+  });
+
+  it('tracks online player names from bedrock connect/disconnect lines', async () => {
+    const FAKE = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+console.log('Server started.');
+setTimeout(() => console.log('Player connected: Steve, xuid: 123'), 100);
+setTimeout(() => console.log('Player connected: Alex, xuid: 456'), 200);
+setTimeout(() => console.log('Player disconnected: Steve, xuid: 123'), 300);
+setTimeout(() => process.exit(0), 500);
+rl.on('line', () => {});
+`;
+    writeFakeBedrock();
+    fs.writeFileSync(path.join(tempDir, 'fake-bedrock.js'), FAKE);
+    manager.start(bedrockConfig());
+
+    await waitFor(
+      () => manager.getStatus('bedrock-server').stats.onlinePlayers.length === 2,
+      5000,
+    );
+    expect(manager.getStatus('bedrock-server').stats.onlinePlayers).toEqual(['Steve', 'Alex']);
+    expect(manager.getStatus('bedrock-server').stats.playerCount).toBe(2);
+
+    await waitFor(
+      () => manager.getStatus('bedrock-server').stats.onlinePlayers.length === 1,
+      5000,
+    );
+    expect(manager.getStatus('bedrock-server').stats.onlinePlayers).toEqual(['Alex']);
+    expect(manager.getStatus('bedrock-server').stats.playerCount).toBe(1);
+
+    await waitFor(() => manager.runningServerId === null, 5000);
   });
 
   it('sends commands via stdin to the bedrock server', async () => {

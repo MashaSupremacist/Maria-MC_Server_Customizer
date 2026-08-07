@@ -8,6 +8,7 @@ import type {
   ConvertServerRequest,
   CreateBackupRequest,
   CreateServerInput,
+  DetectedServerInfo,
   ExtensionListResponse,
   GamerulesDocument,
   ImportWorldRequest,
@@ -50,6 +51,8 @@ export const api = {
   getSettings: (): Promise<AppSettings> => window.msc.getSettings(),
   setServerLibraryPath: (path: string | null): Promise<AppSettings> =>
     window.msc.setSetting('serverLibraryPath', path),
+  setLastJavaPath: (path: string | null): Promise<AppSettings> =>
+    window.msc.setSetting('lastJavaPath', path),
   selectServerLibrary: () => window.msc.selectServerLibrary(),
   selectJavaExecutable: () => window.msc.selectJavaExecutable(),
   selectPlayitExecutable: () => window.msc.selectPlayitExecutable(),
@@ -57,6 +60,8 @@ export const api = {
   listServers: (): Promise<ServerRecord[]> => window.msc.listServers(),
   createServer: (input: CreateServerInput): Promise<ServerRecord> =>
     window.msc.createServer(input),
+  detectServerFolder: (path: string): Promise<DetectedServerInfo> =>
+    window.msc.detectServerFolder(path),
   updateServer: (id: string, input: UpdateServerInput): Promise<ServerRecord> =>
     window.msc.updateServer(id, input),
   deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean }> =>

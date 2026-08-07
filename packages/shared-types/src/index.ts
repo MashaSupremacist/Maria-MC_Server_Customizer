@@ -32,6 +32,7 @@ export const IpcChannels = {
   setSetting: 'settings:set',
   listServers: 'servers:list',
   createServer: 'servers:create',
+  detectServerFolder: 'servers:detect-folder',
   updateServer: 'servers:update',
   deleteServer: 'servers:delete',
   selectJavaExecutable: 'dialog:select-java',
@@ -173,6 +174,16 @@ export interface CreateServerInput {
   jvmArgs?: string[];
 }
 
+/** Result of detecting whether a folder contains an existing Minecraft server. */
+export interface DetectedServerInfo {
+  /** Absolute path that was inspected. */
+  path: string;
+  /** Server edition, when a server was found. */
+  edition: ServerEdition | null;
+  /** Server type (vanilla/fabric/forge/paper/bedrock), when a server was found. */
+  serverType: string | null;
+}
+
 export interface UpdateServerInput {
   name?: string;
   serverType?: string;
@@ -191,6 +202,8 @@ export interface AppSettings {
   playitPath: string | null;
   /** Last known public tunnel address (user-entered or detected). */
   playitPublicAddress: string | null;
+  /** Last java.exe used for a server; pre-filled for new servers. */
+  lastJavaPath: string | null;
 }
 
 /** Backend health payload. */
@@ -354,6 +367,8 @@ export interface ServerStats {
   memoryMb: number;
   /** Current online player count when parseable from the log, else null. */
   playerCount: number | null;
+  /** Names of players currently online, tracked from join/leave log lines. */
+  onlinePlayers: string[];
 }
 
 /** Live status of a managed server process. */

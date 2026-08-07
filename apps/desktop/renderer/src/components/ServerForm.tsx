@@ -6,18 +6,21 @@ import type { InstallController } from '../hooks/useVanillaInstall';
 interface ServerFormProps {
   libraryPath: string | null;
   install: InstallController;
+  /** Last java.exe used; pre-fills the form so users don't re-navigate. */
+  initialJavaPath?: string | null;
   onCreated: (server: ServerRecord) => void;
 }
 
 export default function ServerForm({
   libraryPath,
   install,
+  initialJavaPath = null,
   onCreated,
 }: ServerFormProps): React.JSX.Element {
   const [flavor, setFlavor] = useState<ServerFlavor>('vanilla');
   const [name, setName] = useState('');
   const [folderName, setFolderName] = useState('');
-  const [javaPath, setJavaPath] = useState<string | null>(null);
+  const [javaPath, setJavaPath] = useState<string | null>(initialJavaPath);
   const [memoryMb, setMemoryMb] = useState(1024);
   const [acceptEula, setAcceptEula] = useState(false);
   const [versions, setVersions] = useState<VanillaVersion[]>([]);

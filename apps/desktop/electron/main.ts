@@ -14,6 +14,7 @@ import {
   type CommandResult,
   type CreateBackupRequest,
   type CreateServerInput,
+  type DetectedServerInfo,
   type ConvertServerRequest,
   type ExtensionListResponse,
   type FolderSelectResult,
@@ -290,13 +291,17 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     IpcChannels.setSetting,
     async (_event, key: string, value: unknown): Promise<AppSettings> => {
-      if (key !== 'serverLibraryPath') {
-        throw new Error(`Unknown setting key: ${key}`);
+      if (key === 'serverLibraryPath') {
+        return (await backendFetch('PUT', '/settings', {
+          serverLibraryPath: value,
+        })) as AppSettings;
       }
-      const settings = (await backendFetch('PUT', '/settings', {
-        serverLibraryPath: value,
-      })) as AppSettings;
-      return settings;
+      if (key === 'lastJavaPath') {
+        return (await backendFetch('PUT', '/settings', {
+          lastJavaPath: value,
+        })) as AppSettings;
+      }
+      throw new Error(`Unknown setting key: ${key}`);
     },
   );
 
@@ -308,6 +313,15 @@ function registerIpcHandlers(): void {
     IpcChannels.createServer,
     async (_event, input: CreateServerInput): Promise<ServerRecord> => {
       return (await backendFetch('POST', '/servers', input)) as ServerRecord;
+    },
+  );
+
+  ipcMain.handle(
+    IpcChannels.detectServerFolder,
+    async (_event, path: string): Promise<DetectedServerInfo> => {
+      return (await backendFetch('POST', '/servers/detect', {
+        folderPath: path,
+      })) as DetectedServerInfo;
     },
   );
 

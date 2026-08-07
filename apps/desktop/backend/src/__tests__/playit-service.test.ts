@@ -149,6 +149,66 @@ describe('PlayitService', () => {
       .pop();
     expect(last).toBe('crashed');
   });
+
+  it('reports online when the daemon writes its status to stderr', async () => {
+    // The real MSI playitd (v1) writes INFO logs to stderr; the service must
+    // treat stderr as a first-class stream for online/claim/address detection.
+    const stderrScript = `
+const readline = require('readline');
+console.error('2026-08-06T19:59:28.104395Z  INFO playitd::daemon: Starting playitd socket_path=None');
+setTimeout(() => {
+  console.error('tunnel established, public address: stderr-server.playit.gg');
+}, 200);
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', () => {});
+setInterval(() => {}, 1000);
+process.on('SIGTERM', () => process.exit(0));
+`;
+    fs.writeFileSync(path.join(dataDir, 'stderr-fake.js'), stderrScript);
+    fs.writeFileSync(
+      path.join(dataDir, 'stderr-fake.cmd'),
+      `@echo off\r\nnode "%~dp0stderr-fake.js" %*\r\n`,
+    );
+
+    const err = service.start(path.join(dataDir, 'stderr-fake.cmd'));
+    expect(err).toBeNull();
+    await waitFor(() => service.stateOf() === 'online');
+    await waitFor(() => service.getStatus().detectedAddress === 'stderr-server.playit.gg');
+
+    const status = service.getStatus();
+    expect(status.state).toBe('online');
+    expect(status.detectedAddress).toBe('stderr-server.playit.gg');
+    expect(events.some((e) => e.type === 'playit:state' && e.state === 'online')).toBe(true);
+    // The online line was also surfaced as a (warn) log from stderr.
+    expect(events.some((e) => e.type === 'playit:log' && JSON.stringify(e).includes('tunnel established'))).toBe(true);
+  });
+
+  it('falls back to online after the grace period when the agent stays silent', async () => {
+    // Simulates a daemon that starts, prints nothing recognizable, and just
+    // keeps running (the real playitd often has no stdout/stderr chatter).
+    const silentScript = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', () => {});
+setInterval(() => {}, 1000);
+process.on('SIGTERM', () => process.exit(0));
+`;
+    fs.writeFileSync(path.join(dataDir, 'silent-fake.js'), silentScript);
+    fs.writeFileSync(
+      path.join(dataDir, 'silent-fake.cmd'),
+      `@echo off\r\nnode "%~dp0silent-fake.js" %*\r\n`,
+    );
+
+    const err = service.start(path.join(dataDir, 'silent-fake.cmd'));
+    expect(err).toBeNull();
+    expect(service.stateOf()).toBe('starting');
+
+    // The grace fallback (5s) should flip it to online.
+    await waitFor(() => service.stateOf() === 'online', 8000);
+    expect(service.getStatus().state).toBe('online');
+    expect(service.isRunning()).toBe(true);
+    expect(events.some((e) => e.type === 'playit:state' && e.state === 'online')).toBe(true);
+  });
 });
 
 describe('findSetupLink', () => {

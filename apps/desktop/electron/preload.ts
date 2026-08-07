@@ -11,6 +11,7 @@ import type {
   CreateBackupRequest,
   CreateServerInput,
   ConvertServerRequest,
+  DetectedServerInfo,
   ExtensionListResponse,
   FolderSelectResult,
   GamerulesDocument,
@@ -61,6 +62,7 @@ const CHANNELS = {
   setSetting: 'settings:set',
   listServers: 'servers:list',
   createServer: 'servers:create',
+  detectServerFolder: 'servers:detect-folder',
   updateServer: 'servers:update',
   deleteServer: 'servers:delete',
   selectJavaExecutable: 'dialog:select-java',
@@ -164,6 +166,8 @@ const api = {
     ipcRenderer.invoke(CHANNELS.listServers),
   createServer: (input: CreateServerInput): Promise<ServerRecord> =>
     ipcRenderer.invoke(CHANNELS.createServer, input),
+  detectServerFolder: (path: string): Promise<DetectedServerInfo> =>
+    ipcRenderer.invoke(CHANNELS.detectServerFolder, path),
   updateServer: (id: string, input: UpdateServerInput): Promise<ServerRecord> =>
     ipcRenderer.invoke(CHANNELS.updateServer, id, input),
   deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean }> =>

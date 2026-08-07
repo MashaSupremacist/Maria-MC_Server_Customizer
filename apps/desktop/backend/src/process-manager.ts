@@ -103,7 +103,7 @@ export class ProcessManager {
   private logs: LogLine[] = [];
   private port: number | null = null;
   private statsTimer: NodeJS.Timeout | null = null;
-  private stats: ServerStats = { cpuPercent: 0, memoryMb: 0, playerCount: null };
+  private stats: ServerStats = { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] };
 
   constructor(events: ProcessEvents) {
     this.events = events;
@@ -178,7 +178,7 @@ export class ProcessManager {
     this.exitCode = null;
     this.startedAt = Date.now();
     this.port = config.port;
-    this.stats = { cpuPercent: 0, memoryMb: 0, playerCount: null };
+    this.stats = { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] };
     this.setState('starting');
 
     let launch: { command: string; args: string[] };
@@ -228,16 +228,41 @@ export class ProcessManager {
         const isBedrock = edition === 'bedrock';
         const playerCount = isBedrock ? null : parsePlayerCount(line);
         if (playerCount !== null) {
-          this.stats = { ...this.stats, playerCount };
+          // Full player-count report: refresh the tracked names when the
+          // server lists them, otherwise keep what join/leave lines gave us.
+          const names = parsePlayerList(line);
+          let onlinePlayers = this.stats.onlinePlayers;
+          if (names !== null) {
+            onlinePlayers = names;
+          } else if (playerCount === 0) {
+            onlinePlayers = [];
+          }
+          this.stats = {
+            ...this.stats,
+            playerCount: names && names.length > 0 ? names.length : playerCount,
+            onlinePlayers,
+          };
           this.emitStats();
         } else {
+          const name = isBedrock ? parseBedrockPlayerName(line) : parsePlayerName(line);
           const delta = isBedrock
             ? parseBedrockPlayerDelta(line)
             : parsePlayerDelta(line);
-          if (delta !== null && this.stats.playerCount !== null) {
+          if (delta !== null && name !== null) {
+            const current = this.stats.onlinePlayers;
+            const onlinePlayers =
+              delta > 0
+                ? current.includes(name)
+                  ? current
+                  : [...current, name]
+                : current.filter((n) => n !== name);
             this.stats = {
               ...this.stats,
-              playerCount: Math.max(0, this.stats.playerCount + delta),
+              playerCount:
+                this.stats.playerCount === null
+                  ? null
+                  : Math.max(0, this.stats.playerCount + delta),
+              onlinePlayers,
             };
             this.emitStats();
           }
@@ -354,7 +379,9 @@ export class ProcessManager {
         running && this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : 0,
       exitCode: running ? this.exitCode : null,
       logs: running ? this.logs : [],
-      stats: running ? this.stats : { cpuPercent: 0, memoryMb: 0, playerCount: null },
+      stats: running
+        ? this.stats
+        : { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] },
       address: running && this.port ? `127.0.0.1:${this.port}` : null,
     };
   }
@@ -423,11 +450,39 @@ export function parsePlayerCount(line: string): number | null {
   return parseInt(match[1], 10);
 }
 
+/**
+ * Parse the comma-separated player names from a full player-count line like
+ * "There are 2 of a max of 20 players online: Steve, Alex". Returns null
+ * when no names are listed (the modern Vanilla report omits them).
+ */
+export function parsePlayerList(line: string): string[] | null {
+  const match = line.match(/players online:\s*(.*)$/);
+  if (!match) return null;
+  const tail = match[1].trim();
+  if (!tail) return [];
+  return tail
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+}
+
+/** Extract the player name from a join/leave line, or null. */
+export function parsePlayerName(line: string): string | null {
+  const match = line.match(/^([A-Za-z0-9_]{1,16}) (?:joined the game|left the game)/);
+  return match ? match[1] : null;
+}
+
 /** Detect a player join/leave line; returns +1/-1 delta or null. */
 export function parsePlayerDelta(line: string): number | null {
   if (/joined the game/.test(line)) return 1;
   if (/left the game/.test(line)) return -1;
   return null;
+}
+
+/** Extract the player name from a Bedrock connect/disconnect line, or null. */
+export function parseBedrockPlayerName(line: string): string | null {
+  const match = line.match(/(?:Player connected|Player disconnected):\s*([^,\s]+)/);
+  return match ? match[1] : null;
 }
 
 /** Detect a Bedrock player connect/disconnect line; returns +1/-1 or null. */

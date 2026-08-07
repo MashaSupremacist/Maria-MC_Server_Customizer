@@ -10,16 +10,22 @@ interface SidebarProps {
   edition: Edition;
   nav: NavItem[];
   activePage: string;
+  /** Name of the currently selected server (null when none). */
+  selectedServerName?: string | null;
   onEditionChange: (edition: Edition) => void;
   onNavigate: (page: string) => void;
+  /** Opens the "Add Server" view. */
+  onAddServer: () => void;
 }
 
 export default function Sidebar({
   edition,
   nav,
   activePage,
+  selectedServerName = null,
   onEditionChange,
   onNavigate,
+  onAddServer,
 }: SidebarProps): React.JSX.Element {
   return (
     <aside className="sidebar">
@@ -58,7 +64,12 @@ export default function Sidebar({
       </nav>
 
       <div className="sidebar-footer">
-        <span className="muted">No server selected</span>
+        <span className="muted sidebar-footer-server">
+          {selectedServerName ? selectedServerName : 'No server selected'}
+        </span>
+        <button type="button" className="btn btn-sm sidebar-add-server" onClick={onAddServer}>
+          + Add {edition === 'java' ? 'Java' : 'Bedrock'} Server
+        </button>
       </div>
     </aside>
   );

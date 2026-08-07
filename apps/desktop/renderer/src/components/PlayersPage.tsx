@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import type { PlayerListEntry, ServerRecord } from '@msc/shared-types';
 import { api } from '../lib/api';
+import type { ServerRuntime } from '../hooks/useServerRuntime';
 
 interface PlayersPageProps {
   server: ServerRecord;
+  runtime: ServerRuntime;
 }
 
 type ListKey = 'whitelist' | 'ops' | 'bans' | 'ipbans';
@@ -15,8 +17,9 @@ const LISTS: { key: ListKey; title: string; addLabel: string }[] = [
   { key: 'ipbans', title: 'IP Bans', addLabel: 'Ban IP' },
 ];
 
-export default function PlayersPage({ server }: PlayersPageProps): React.JSX.Element {
+export default function PlayersPage({ server, runtime }: PlayersPageProps): React.JSX.Element {
   const isBedrock = server.edition === 'bedrock';
+  const { state, stats } = runtime;
   const [lists, setLists] = useState<Record<ListKey, PlayerListEntry[]>>({
     whitelist: [],
     ops: [],
@@ -120,6 +123,34 @@ export default function PlayersPage({ server }: PlayersPageProps): React.JSX.Ele
         <h1>Players</h1>
         <span className="page-edition muted">{server.name}</span>
       </header>
+
+      <div className="panel">
+        <h2 className="panel-title">
+          Online Now{' '}
+          <span className="muted">
+            {state === 'online'
+              ? `(${stats.playerCount === null ? '?' : stats.playerCount})`
+              : ''}
+          </span>
+        </h2>
+        {state === 'online' ? (
+          stats.onlinePlayers.length === 0 ? (
+            <p className="muted">
+              No players online right now. Player names appear here as they join.
+            </p>
+          ) : (
+            <div className="online-players">
+              {stats.onlinePlayers.map((name) => (
+                <span key={name} className="online-player-chip">
+                  {name}
+                </span>
+              ))}
+            </div>
+          )
+        ) : (
+          <p className="muted">The server is {state}. Start it to see who is online.</p>
+        )}
+      </div>
 
       {notice && <div className="notice-banner">{notice}</div>}
       {loadError && <div className="error-banner">{loadError}</div>}

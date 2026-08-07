@@ -94,13 +94,14 @@ export default function PlayitPage({ server, runtime }: PlayitPageProps): React.
                   openLink('https://playit.gg/download');
                 }}
               >
-                Download it free from playit.gg
+                Download the Windows installer (MSI) from playit.gg
               </a>{' '}
-              (Windows agent, single <code>playit.exe</code>).
+              and run it.
             </li>
             <li>
-              Click <strong>Select…</strong> below and choose the <code>playit.exe</code> you
-              downloaded. The app remembers it.
+              The MSI installs the agent to <code>C:\Program Files\playit_gg\bin\playit.exe</code>.
+              Click <strong>Select…</strong> below and choose that file (the small{' '}
+              <code>playit.exe</code> in the <code>bin</code> folder, not the setup download).
             </li>
             <li>
               Click <strong>Start Playit</strong>. The app streams its output here and watches
@@ -125,8 +126,8 @@ export default function PlayitPage({ server, runtime }: PlayitPageProps): React.
           </ol>
         ) : (
           <p className="muted">
-            New to Playit? The guide covers downloading the agent, logging in / claiming, and
-            pointing a tunnel at your server.
+            New to Playit? The guide covers installing the agent (MSI), selecting it, logging
+            in / claiming, and pointing a tunnel at your server.
           </p>
         )}
       </div>
@@ -142,8 +143,9 @@ export default function PlayitPage({ server, runtime }: PlayitPageProps): React.
       <div className="panel">
         <h2 className="panel-title">Executable</h2>
         <p className="muted">
-          Playit exposes your server through a public address. Choose the Playit agent you
-          downloaded, then start it and complete the setup in your browser.
+          Playit exposes your server through a public address. Pick the agent installed by the
+          MSI (<code>C:\Program Files\playit_gg\bin\playit.exe</code>), then start it and
+          complete the setup in your browser. The app remembers your choice.
         </p>
         <div className="dash-row">
           <span className="path-text">{playit.settings?.playitPath ?? 'Not selected'}</span>

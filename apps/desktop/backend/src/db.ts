@@ -248,6 +248,7 @@ export function openDatabase(dataDir: string): DatabaseResult {
       serverLibraryPath: map.serverLibraryPath ?? null,
       playitPath: map.playitPath ?? null,
       playitPublicAddress: map.playitPublicAddress ?? null,
+      lastJavaPath: map.lastJavaPath ?? null,
     };
   };
 

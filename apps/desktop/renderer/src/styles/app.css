@@ -137,6 +137,19 @@
   padding: 8px 12px;
   border-top: 1px solid var(--border);
   font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-footer-server {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-add-server {
+  width: 100%;
 }
 
 /* ---- Content ---- */
@@ -900,6 +913,23 @@ section.page > .settings-list {
   width: 280px;
 }
 
+.online-players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.online-player-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: rgba(0, 255, 136, 0.06);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
 .players-table {
   width: 100%;
   border-collapse: collapse;
@@ -1059,6 +1089,68 @@ section.page > .settings-list {
   border: 1px solid var(--danger);
   border-radius: 3px;
   padding: 0 4px;
+}
+/* ---- Add server chip ---- */
+
+.server-chip-add {
+  border-style: dashed;
+  color: var(--accent);
+  background: transparent;
+}
+
+.server-chip-add:hover {
+  color: var(--accent-bright, var(--accent));
+  border-color: var(--accent);
+  background: var(--panel-raised);
+}
+/* ---- Empty state + Add Server tabs ---- */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.empty-state-muted {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.add-server-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.add-server-tab {
+  height: 34px;
+  padding: 0 16px;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.add-server-tab:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.add-server-tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--panel-raised);
+}
+
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
 }
 /* ---- Indeterminate progress (percent unknown) ---- */
 

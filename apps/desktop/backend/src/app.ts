@@ -44,6 +44,7 @@ import {
   type WorldDiscoveryResult,
   type WsServerEvent,
 } from '@msc/shared-types';
+import { detectServerFolder, detectedServerType } from './server-detector';
 import { openDatabase, type DatabaseResult } from './db';
 import { ServerManagerService } from './server-manager';
 import { VanillaInstallerService } from './vanilla-installer';
@@ -73,6 +74,15 @@ const SERVER_CREATE_SCHEMA = {
     port: { type: 'integer', minimum: 1, maximum: 65535 },
     version: { type: ['string', 'null'] },
     jvmArgs: { type: 'array', items: { type: 'string' } },
+  },
+} as const;
+
+const SERVER_DETECT_SCHEMA = {
+  type: 'object',
+  required: ['folderPath'],
+  additionalProperties: false,
+  properties: {
+    folderPath: { type: 'string', minLength: 1 },
   },
 } as const;
 
@@ -362,6 +372,19 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   // Servers
   app.get('/servers', async (): Promise<ServerRecord[]> => db.listServers());
 
+  app.post<{ Body: { folderPath: string } }>(
+    '/servers/detect',
+    { schema: { body: SERVER_DETECT_SCHEMA } },
+    async (request) => {
+      const detected = detectServerFolder(request.body.folderPath);
+      return {
+        path: request.body.folderPath,
+        edition: detected ? detected.edition : null,
+        serverType: detected ? detectedServerType(detected) : null,
+      };
+    },
+  );
+
   app.post<{ Body: CreateServerInput }>(
     '/servers',
     { schema: { body: SERVER_CREATE_SCHEMA } },
@@ -568,6 +591,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
           additionalProperties: false,
           properties: {
             serverLibraryPath: { type: ['string', 'null'] },
+            lastJavaPath: { type: ['string', 'null'] },
           },
         },
       },
@@ -576,6 +600,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       const body = request.body;
       if (body.serverLibraryPath !== undefined) {
         db.setSetting('serverLibraryPath', body.serverLibraryPath);
+      }
+      if (body.lastJavaPath !== undefined) {
+        db.setSetting('lastJavaPath', body.lastJavaPath);
       }
       return db.getSettings();
     },

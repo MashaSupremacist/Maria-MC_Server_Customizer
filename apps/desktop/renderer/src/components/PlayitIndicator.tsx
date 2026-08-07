@@ -9,10 +9,12 @@ export default function PlayitIndicator(): React.JSX.Element {
   const playit = usePlayit();
   const { state, detectedAddress, settings, error, start, stop } = playit;
 
+  const stateLabel = state === 'online' ? 'running' : state;
+
   return (
     <div className="playit-indicator" title="Playit tunnel status (global)">
       <span className={`playit-dot ${state}`} />
-      <span className="playit-state">Playit {state}</span>
+      <span className="playit-state">Playit {stateLabel}</span>
       {(state === 'online' || state === 'starting' || state === 'stopping') && (
         <button
           type="button"

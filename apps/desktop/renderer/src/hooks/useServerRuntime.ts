@@ -39,6 +39,7 @@ export function useServerRuntime(serverId: string | null): ServerRuntime {
     cpuPercent: 0,
     memoryMb: 0,
     playerCount: null,
+    onlinePlayers: [],
   });
   const [address, setAddress] = useState<string | null>(null);
   const wsRef = useRef<WsClient | null>(null);
@@ -105,7 +106,7 @@ export function useServerRuntime(serverId: string | null): ServerRuntime {
       setPid(null);
       setUptimeSeconds(0);
       setExitCode(null);
-      setStats({ cpuPercent: 0, memoryMb: 0, playerCount: null });
+      setStats({ cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] });
       setAddress(null);
       return;
     }
