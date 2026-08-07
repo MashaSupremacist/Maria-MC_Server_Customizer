@@ -23,14 +23,14 @@
 ### Portable EXE — recommended
 
 1. Open [Releases](https://github.com/MashaSupremacist/Minecraft-Server-Customizer/releases).
-2. Download **`Minecraft Server Customizer-Portable-x.y.z.exe`**.
+2. Download **`Minecraft.Server.Customizer-Portable-x.y.z.exe`**.
 3. Double-click the downloaded file. No installation is required.
 
 The portable executable is self-contained. Application data, servers, backups, and downloaded runtimes remain under your Windows user profile rather than beside the executable.
 
 ### Installer
 
-If you prefer desktop and Start Menu shortcuts, download **`Minecraft Server Customizer-Setup-x.y.z.exe`** instead.
+If you prefer desktop and Start Menu shortcuts, download **`Minecraft.Server.Customizer-Setup-x.y.z.exe`** instead.
 
 > [!NOTE]
 > Current builds are unsigned. Windows SmartScreen may show an **Unknown publisher** warning on first launch. Code signing is planned for a future release.
@@ -72,7 +72,7 @@ Uninstalling the desktop application does not automatically delete that server d
 Every GitHub Release includes `SHA256SUMS.txt`. From Git Bash, compare the published checksum with your download:
 
 ```sh
-sha256sum "Minecraft Server Customizer-Portable-0.1.0.exe"
+sha256sum "Minecraft.Server.Customizer-Portable-0.1.0.exe"
 ```
 
 ## Development
