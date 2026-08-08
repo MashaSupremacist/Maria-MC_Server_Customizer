@@ -61,6 +61,29 @@ function makeBareServerZip(filePath: string, mcVersion = '1.7.10'): Promise<void
   });
 }
 
+/** Build a batch-launcher-only pack: a start.bat that references a server jar. */
+function makeBatchLauncherZip(
+  filePath: string,
+  options: { launcher?: string; batContent?: string } = {},
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const zip = new yazl.ZipFile();
+    zip.addBuffer(
+      Buffer.from(
+        options.batContent ??
+          '@echo off\r\njava -Xmx2G -jar libraries/net/minecraft/server/1.7.10/server.jar nogui\r\n',
+      ),
+      options.launcher ?? 'start.bat',
+    );
+    zip.addBuffer(Buffer.from('fake lib'), 'libraries/net/minecraft/server/1.7.10/server.jar');
+    const output = fs.createWriteStream(filePath);
+    output.on('error', reject);
+    output.on('close', resolve);
+    zip.outputStream.pipe(output);
+    zip.end();
+  });
+}
+
 /** Create an in-memory zip buffer from an array of {name, content} pairs. */
 function makeZipBuffer(
   entries: Array<{ name: string; content: string | Buffer }>,
@@ -188,6 +211,28 @@ describe.sequential('PackInstallerService', () => {
     expect(info.requiredJava).toBe(17);
   });
 
+  it('detects a batch-launcher-only pack (start.bat, no jar at root)', async () => {
+    const pack = path.join(dataDir, 'launcher.zip');
+    await makeBatchLauncherZip(pack);
+    const info = await service.inspect(pack);
+    expect(info.ok).toBe(true);
+    expect(info.mcVersion).toBe('1.7.10');
+    expect(info.loader).toBeNull();
+    expect(info.hasServerJar).toBe(false);
+    expect(info.hasLauncher).toBe(true);
+    expect(info.needsInstallStep).toBe(false);
+    expect(info.requiredJava).toBe(8);
+  });
+
+  it('detects a batch launcher with no recognizable version', async () => {
+    const pack = path.join(dataDir, 'launcher-nover.zip');
+    await makeBatchLauncherZip(pack, { batContent: '@echo off\r\njava -jar server.jar nogui\r\n' });
+    const info = await service.inspect(pack);
+    expect(info.ok).toBe(true);
+    expect(info.mcVersion).toBeNull();
+    expect(info.hasLauncher).toBe(true);
+  });
+
   it('rejects a non-zip file', async () => {
     const pack = path.join(dataDir, 'random.txt');
     fs.writeFileSync(pack, 'hi');
@@ -240,6 +285,27 @@ describe.sequential('PackInstallerService', () => {
       ),
     ).toBe(true);
     expect(res.filesCopied).toBe(2); // the universal jar + config
+  });
+
+  it('creates a server from a batch-launcher-only pack', async () => {
+    const pack = path.join(dataDir, 'launcher-create.zip');
+    await makeBatchLauncherZip(pack);
+    const res = await service.create({
+      filePath: pack,
+      name: 'Launcher Pack',
+      acceptEula: true,
+    });
+    expect(res.ok).toBe(true);
+    const record = res.server!;
+    // Registered as a vanilla Java server; the batch launcher is what runs it.
+    expect(record.serverType).toBe('vanilla');
+    expect(record.version).toBe('1.7.10');
+    // The start.bat and its referenced jar are extracted to the server folder.
+    expect(fs.existsSync(path.join(record.folderPath, 'start.bat'))).toBe(true);
+    expect(
+      fs.existsSync(path.join(record.folderPath, 'libraries', 'net', 'minecraft', 'server', '1.7.10', 'server.jar')),
+    ).toBe(true);
+    expect(fs.existsSync(path.join(record.folderPath, 'eula.txt'))).toBe(true);
   });
 
   it('rejects creation without EULA', async () => {

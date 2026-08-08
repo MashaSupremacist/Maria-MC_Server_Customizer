@@ -9,9 +9,14 @@ export interface DetectedServer {
   flavor: ServerFlavor;
   /** Minecraft version sniffed from the server jar name, when readable. */
   version: string | null;
+  /** True when recognized via a batch launcher (start.bat) instead of a jar. */
+  isBatchLauncher?: boolean;
 }
 
 const BEDROCK_EXECUTABLES = ['bedrock_server.exe', 'bedrock_server.cmd', 'bedrock_server.bat'];
+
+/** Common batch launcher names for packs that ship a start script instead of a bare jar. */
+const BATCH_LAUNCHERS = ['start.bat', 'run.bat', 'start-server.bat', 'startserver.bat', 'launch.bat', 'server.bat'];
 
 /**
  * Sniff a Minecraft version out of a server jar file name. Understands the
@@ -77,18 +82,62 @@ export function detectServerFolder(folderPath: string): DetectedServer | null {
   }
 
   const jars = entries.filter((f) => f.endsWith('.jar'));
-  if (jars.length === 0) return null;
+
+  // A folder with no *runnable* jar but a batch launcher (start.bat /
+  // run.bat / …) is a Java server pack: the .bat wraps `java -jar <server
+  // jar>`, so it is a Java server even though the real jar sits under
+  // libraries/ or another subfolder. Installer jars (forge-installer.jar /
+  // forge-<mc>-<build>-installer.jar) are bootstrap GUIs, not runnable
+  // servers, so they don't count as a real jar either — a Forge pack that
+  // ships only the installer plus a launcher is still a batch-launcher pack.
+  const runnableJars = jars.filter((f) => !f.includes('-installer.'));
+  if (runnableJars.length === 0) {
+    const launcher = entries.find((f) => BATCH_LAUNCHERS.includes(f.toLowerCase()));
+    if (launcher) {
+      return {
+        edition: 'java',
+        flavor: 'vanilla',
+        version: sniffVersionFromLauncher(path.join(folderPath, launcher)),
+        isBatchLauncher: true,
+      };
+    }
+    return null;
+  }
 
   if (jars.includes('fabric-server-launch.jar')) {
     return { edition: 'java', flavor: 'fabric', version: sniffVersionFromJar('fabric-server-launch.jar') };
   }
-  const forgeJars = jars.filter((f) => f.startsWith('forge-') && f !== 'forge-installer.jar');
+  const forgeJars = jars.filter(
+    (f) =>
+      f.startsWith('forge-') &&
+      // Exclude installer jars — both legacy forge-installer.jar and modern
+      // forge-<mc>-<build>-installer.jar are bootstrap GUIs, not servers.
+      !f.includes('-installer.'),
+  );
   if (forgeJars.length > 0) {
     return {
       edition: 'java',
       flavor: 'forge',
       version: sniffVersionFromJar(forgeJars[0]),
     };
+  }
+  // A Forge installer (forge-<mc>-<build>-installer.jar) marks a Forge pack
+  // even when the real server jar sits under libraries/. If a recognized
+  // batch launcher is present too, the pack is launched by the script — a
+  // root server.jar in that case is the Forge shim/wrapper, not vanilla.
+  const hasForgeInstaller = jars.some(
+    (f) => f.startsWith('forge-') && f.includes('-installer.'),
+  );
+  if (hasForgeInstaller) {
+    const launcher = entries.find((f) => BATCH_LAUNCHERS.includes(f.toLowerCase()));
+    if (launcher) {
+      return {
+        edition: 'java',
+        flavor: 'vanilla',
+        version: sniffVersionFromLauncher(path.join(folderPath, launcher)),
+        isBatchLauncher: true,
+      };
+    }
   }
   const paperJars = jars.filter((f) => f.startsWith('paper-'));
   if (paperJars.length > 0) {
@@ -135,4 +184,40 @@ export function detectedServerLabel(detected: DetectedServer): string {
 /** Default folder basename for naming a detected server. */
 export function folderBaseName(folderPath: string): string {
   return path.basename(folderPath);
+}
+
+/**
+ * Sniff a Minecraft version out of a batch launcher (start.bat / run.bat).
+ * Packs that ship only a launcher typically reference the server jar inside
+ * it (e.g. `java -jar libraries/net/minecraft/server/1.7.10/server.jar`), so
+ * scan the file content for a recognizable versioned jar name — either a jar
+ * with a version embedded in its filename, or a version-like path segment
+ * (the `1.7.10/` folder in a Maven-style server.jar path). Returns null when
+ * the launcher is missing/unreadable or names no versioned jar.
+ */
+export function sniffVersionFromLauncher(launcherPath: string): string | null {
+  let content: string;
+  try {
+    content = fs.readFileSync(launcherPath, 'utf8');
+  } catch {
+    return null;
+  }
+  return sniffVersionFromLauncherContent(content);
+}
+
+/** Sniff a Minecraft version out of batch launcher text content. */
+export function sniffVersionFromLauncherContent(content: string): string | null {
+  const jarNames = content.match(/[\w./\\-]*[\w-]\.jar/gi) ?? [];
+  for (const jar of jarNames) {
+    // 1) Version in the jar filename (e.g. minecraft_server.1.7.10.jar).
+    const base = jar.split(/[\\/]/).pop() ?? jar;
+    const filenameVersion = sniffVersionFromJar(base);
+    if (filenameVersion) return filenameVersion;
+    // 2) Version as a Maven path segment (e.g. .../server/1.7.10/server.jar).
+    const pathSegments = jar.split(/[\\/]/);
+    for (const segment of pathSegments) {
+      if (/^1\.\d{1,2}(\.\d{1,2})?$/.test(segment)) return segment;
+    }
+  }
+  return null;
 }

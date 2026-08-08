@@ -35,6 +35,9 @@ export interface ProcessEvents {
 const LOG_LIMIT = 500;
 const STATS_INTERVAL_MS = 2000;
 
+/** Common batch launcher names for packs that ship a start script instead of a bare jar. */
+const BATCH_LAUNCHERS = ['start.bat', 'run.bat', 'start-server.bat', 'startserver.bat', 'launch.bat', 'server.bat'];
+
 /** Find the server jar in a server folder, flavor-aware. */
 export function findServerJar(
   folderPath: string,
@@ -48,9 +51,11 @@ export function findServerJar(
   if (flavor === 'forge') {
     // Forge generates forge-<mc>-<build>.jar (the installer is removed).
     // A -shim.jar launcher may also exist; prefer the real server jar.
+    // Exclude *installer jars* — both the legacy forge-installer.jar and the
+    // modern forge-<mc>-<build>-installer.jar are bootstrap GUIs, not servers.
     const forgeJars = fs
       .readdirSync(folderPath)
-      .filter((f) => f.startsWith('forge-') && f.endsWith('.jar') && f !== 'forge-installer.jar');
+      .filter((f) => f.startsWith('forge-') && f.endsWith('.jar') && !f.includes('-installer.'));
     const real = forgeJars.find((f) => !f.includes('-shim.'));
     return real ? path.join(folderPath, real) : forgeJars.length > 0 ? path.join(folderPath, forgeJars[0]) : null;
   }
@@ -73,6 +78,19 @@ export function findServerJar(
   }
 }
 
+/** Find a batch launcher (start.bat / run.bat / …) in a server folder, if any. */
+export function findBatchLauncher(folderPath: string): string | null {
+  if (!fs.existsSync(folderPath)) return null;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(folderPath);
+  } catch {
+    return null;
+  }
+  const launcher = entries.find((f) => BATCH_LAUNCHERS.includes(f.toLowerCase()));
+  return launcher ? path.join(folderPath, launcher) : null;
+}
+
 /** Find the executable/launcher for a server folder, edition-aware. */
 export function findServerExecutable(
   folderPath: string,
@@ -88,7 +106,12 @@ export function findServerExecutable(
     }
     return null;
   }
-  return findServerJar(folderPath, flavor);
+  const jar = findServerJar(folderPath, flavor);
+  if (jar) return jar;
+  // No runnable jar: fall back to a batch launcher (start.bat / run.bat).
+  // Some server packs ship only the launcher and keep the real jar under
+  // libraries/ or another subfolder, so `java -jar server.jar` can't run.
+  return findBatchLauncher(folderPath);
 }
 
 /**
@@ -165,18 +188,20 @@ export class ProcessManager {
       }
       return {
         code: 'missing-jar',
-        message: 'No server.jar (or single .jar) found in the server folder',
+        message: 'No server.jar, single .jar, or start.bat launcher found in the server folder',
       };
     }
-    if (edition === 'java' && !fs.existsSync(config.javaPath)) {
+    const isBatchLauncher = /\.(bat|cmd)$/i.test(executable);
+    if (edition === 'java' && !isBatchLauncher && !fs.existsSync(config.javaPath)) {
       return {
         code: 'missing-java',
         message: `Java executable not found: ${config.javaPath}`,
       };
     }
     // Vanilla/Forge servers refuse to start without an accepted EULA; catch
-    // it here with a clear message instead of a cryptic crash.
-    if (edition === 'java' && !fs.existsSync(path.join(config.folderPath, 'eula.txt'))) {
+    // it here with a clear message instead of a cryptic crash. A batch
+    // launcher (start.bat) needs no eula.txt — the script runs as-is.
+    if (edition === 'java' && !isBatchLauncher && !fs.existsSync(path.join(config.folderPath, 'eula.txt'))) {
       return {
         code: 'missing-eula',
         message:
@@ -199,6 +224,15 @@ export class ProcessManager {
       isCmdWrapper = /\.(cmd|bat)$/i.test(executable);
       this.pushLog(`Starting "${config.name}"…`);
       this.pushLog(`Command: ${executable}`);
+    } else if (isBatchLauncher) {
+      // Server pack with a batch launcher (start.bat) instead of a bare jar:
+      // the script owns the full java invocation, so run it as-is via cmd /c.
+      // The configured java/RAM are not applied — the pack author's script
+      // decides. Its stdout/stderr still stream into the console and stats.
+      launch = { command: executable, args: [] };
+      isCmdWrapper = true;
+      this.pushLog(`Starting "${config.name}" via batch launcher…`);
+      this.pushLog(`Command: ${executable}`);
     } else {
       launch = {
         command: config.javaPath,
@@ -217,17 +251,37 @@ export class ProcessManager {
 
     // Windows cannot exec a .cmd/.bat directly; route them through cmd /c.
     // Real bedrock_server.exe spawns directly. (Tests use .cmd wrappers.)
+    // The launcher path may contain spaces, so never pass the full path to
+    // cmd — /s strips the quotes cmd sees and it re-parses the command,
+    // splitting on the space. cmd runs with cwd = the server folder, so a
+    // bare filename resolves correctly and needs no quoting.
     let command = launch.command;
     let args = launch.args;
+    let env: NodeJS.ProcessEnv | undefined;
     if (isCmdWrapper) {
+      const launcherName =
+        edition === 'bedrock' || isBatchLauncher
+          ? path.basename(launch.command)
+          : launch.command;
       command = process.env.ComSpec ?? 'cmd.exe';
-      args = ['/d', '/s', '/c', launch.command];
+      args = ['/d', '/s', '/c', launcherName];
+      // Batch launchers (start.bat / run.bat) call bare `java`, which resolves
+      // via PATH. Put the configured java's bin folder first so the pack runs
+      // with the runtime the user selected, not whatever is on the system PATH.
+      if (isBatchLauncher && config.javaPath) {
+        const javaBin = path.dirname(config.javaPath);
+        env = {
+          ...process.env,
+          PATH: `${javaBin}${path.delimiter}${process.env.PATH ?? ''}`,
+        };
+      }
     }
 
     const child = spawn(command, args, {
       cwd: config.folderPath,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      ...(env ? { env } : {}),
     });
     this.child = child;
     this.startStatsTimer(child.pid);

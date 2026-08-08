@@ -6,7 +6,12 @@ import type {
   WsServerEvent,
 } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
-import { findServerJar, ProcessManager, type ServerConfig } from './process-manager';
+import {
+  findBatchLauncher,
+  findServerJar,
+  ProcessManager,
+  type ServerConfig,
+} from './process-manager';
 
 export type WsBroadcast = (event: WsServerEvent) => void;
 
@@ -76,7 +81,12 @@ export class ServerManagerService {
     if (!record) {
       return { code: 'not-found', message: `No server record with id ${serverId}` };
     }
-    if (record.edition !== 'bedrock') {
+    // A batch-launcher server (start.bat / run.bat) owns its own java
+    // invocation — the script decides the JVM, not the app. Skip Java
+    // resolution and validation entirely for those folders.
+    const isBatchLauncher =
+      record.edition !== 'bedrock' && findBatchLauncher(record.folderPath) !== null;
+    if (record.edition !== 'bedrock' && !isBatchLauncher) {
       if (!record.javaPath) {
         if (this.resolveJavaPath) {
           const resolved = await this.resolveJavaPath();
@@ -101,8 +111,9 @@ export class ServerManagerService {
       };
     }
 
-    // Validate Java compatibility before launching (Bedrock needs no Java).
-    if (record.edition !== 'bedrock' && this.validateJava) {
+    // Validate Java compatibility before launching (Bedrock needs no Java,
+    // and batch-launcher folders run their own script).
+    if (record.edition !== 'bedrock' && !isBatchLauncher && this.validateJava) {
       const validationError = await this.validateJava(record.version, record.javaPath as string);
       if (validationError) return validationError;
     }
@@ -111,7 +122,15 @@ export class ServerManagerService {
       serverId: record.id,
       name: record.name,
       folderPath: record.folderPath,
-      javaPath: record.edition === 'bedrock' ? '' : (record.javaPath as string),
+      // Bedrock needs no java. For batch launchers the configured java is
+      // passed through so ProcessManager can put it on the child's PATH
+      // (the launcher calls bare `java`); empty string means "rely on PATH".
+      javaPath:
+        record.edition === 'bedrock'
+          ? ''
+          : isBatchLauncher
+            ? (record.javaPath ?? '')
+            : (record.javaPath as string),
       memoryMb: record.memoryMb,
       jvmArgs: record.jvmArgs,
       port: record.port,

@@ -12,7 +12,10 @@ import type {
 } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
 import { createServerFolder, type ServerInstallerService } from './server-installer';
-import { sniffVersionFromJar } from './server-detector';
+import {
+  sniffVersionFromJar,
+  sniffVersionFromLauncherContent,
+} from './server-detector';
 import { requiredJavaForMinecraft, javaLabel } from './java-service';
 import {
   extractZipEntryToFile,
@@ -112,6 +115,7 @@ export class PackInstallerService {
       mcVersion,
       loader: info.loader ?? null,
       hasServerJar: info.hasServerJar,
+      hasLauncher: info.hasLauncher,
       needsInstallStep: info.needsInstallStep,
       requiredJava,
       requiredJavaLabel: javaLabel(requiredJava),
@@ -264,7 +268,11 @@ export class PackInstallerService {
 
   /** Read the pack's manifest/index + sniff jar names for version/loader. */
   private async readPackInfo(filePath: string): Promise<
-    (InternalPackInfo & { hasServerJar: boolean; needsInstallStep: boolean }) | null
+    (InternalPackInfo & {
+      hasServerJar: boolean;
+      needsInstallStep: boolean;
+      hasLauncher: boolean;
+    }) | null
   > {
     const entries = await listZipEntries(filePath);
     if (!entries) return null;
@@ -360,21 +368,54 @@ export class PackInstallerService {
       }
     }
 
+    // A batch launcher (start.bat / run.bat) with no manifest, jar, or mods/
+    // is still a Java server pack: the .bat wraps `java -jar <server jar>`
+    // (the real jar often lives under libraries/ or a subfolder). Sniff the
+    // launcher's content for a versioned jar name. This also upgrades a
+    // mods-only zip whose launcher references a versioned server jar.
+    if (!info || (hasLauncherCandidates(entries) && !info.mcVersion)) {
+      const launcherEntry = entries.find((e) => isBatchLauncherEntry(e));
+      if (launcherEntry) {
+        const content = await readZipEntryText(filePath, launcherEntry);
+        const mcVersion = content ? sniffVersionFromLauncherContent(content) : null;
+        info = {
+          kind: 'zip',
+          mcVersion: mcVersion ?? info?.mcVersion ?? null,
+          loader: info?.loader,
+        };
+      }
+    }
+
     if (!info) return null;
 
     const hasMods = entries.some((e) => e === 'mods' || e.startsWith('mods/'));
+    // A "runnable server jar" must sit at the zip root — that's what the app
+    // would launch directly (findServerJar only looks at the folder root).
+    // A server.jar under libraries/ (typical of start.bat packs) is not the
+    // launch target; the batch launcher is.
     const hasServerJar =
-      entries.some((e) => path.basename(e) === 'server.jar') ||
+      entries.some((e) => !e.includes('/') && path.basename(e) === 'server.jar') ||
       entries.some((e) => {
+        if (e.includes('/')) return false;
         const base = path.basename(e);
         return base.startsWith('forge-') && base !== 'forge-installer.jar' && base.includes('universal');
       });
     const hasForgeInstaller = entries.some((e) => path.basename(e) === 'forge-installer.jar');
+    const hasLauncher = entries.some((e) => {
+      const base = path.basename(e).toLowerCase();
+      return (
+        base.endsWith('.bat') &&
+        ['start', 'run', 'start-server', 'startserver', 'launch', 'server'].includes(
+          base.replace(/\.bat$/, ''),
+        )
+      );
+    });
 
     return {
       ...info,
       hasServerJar,
       needsInstallStep: !!hasForgeInstaller && !hasServerJar,
+      hasLauncher,
     };
   }
 
@@ -452,6 +493,7 @@ export class PackInstallerService {
       mcVersion: null,
       loader: null,
       hasServerJar: false,
+      hasLauncher: false,
       needsInstallStep: false,
       requiredJava: 8,
       requiredJavaLabel: 'Java 8',
@@ -565,4 +607,26 @@ function writeServerProperties(
     'max-tick-time=60000',
   ];
   fs.writeFileSync(filePath, lines.join('\n') + '\n');
+}
+
+/** Names of batch launcher files recognized as server launch scripts. */
+const BATCH_LAUNCHER_NAMES = new Set([
+  'start.bat',
+  'run.bat',
+  'start-server.bat',
+  'startserver.bat',
+  'launch.bat',
+  'server.bat',
+]);
+
+/** True when a zip entry path is a recognized batch launcher at its root. */
+function isBatchLauncherEntry(entry: string): boolean {
+  const normalized = entry.replace(/\\/g, '/');
+  const base = normalized.split('/').pop()?.toLowerCase() ?? '';
+  return BATCH_LAUNCHER_NAMES.has(base) && normalized.indexOf('/') === normalized.lastIndexOf('/') || false;
+}
+
+/** True when the zip contains any recognized batch launcher entry. */
+function hasLauncherCandidates(entries: string[]): boolean {
+  return entries.some((e) => isBatchLauncherEntry(e));
 }

@@ -197,6 +197,11 @@ export interface DetectedServerInfo {
    * (e.g. "1.7.10" from forge-1.7.10-...-universal.jar). Null otherwise.
    */
   version: string | null;
+  /**
+   * True when the folder was recognized via a batch launcher (start.bat /
+   * run.bat) instead of a server jar. The launcher owns the java invocation.
+   */
+  isBatchLauncher?: boolean;
 }
 
 export interface UpdateServerInput {
@@ -374,6 +379,8 @@ export interface PackInspection {
   loader: 'forge' | 'fabric' | 'vanilla' | null;
   /** True when the pack ships a runnable server jar. */
   hasServerJar: boolean;
+  /** True when the pack ships a batch launcher (start.bat) instead of a jar. */
+  hasLauncher?: boolean;
   /** True when the pack ships a forge installer that needs --installServer. */
   needsInstallStep: boolean;
   /** Java feature version the pack's MC version requires (e.g. 8 for 1.7.10). */

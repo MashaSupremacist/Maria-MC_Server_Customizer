@@ -15,6 +15,7 @@ import {
   type CreateFromPackResult,
   type CreateServerInput,
   type ConvertServerRequest,
+  type DetectedServerInfo,
   type ExtensionListResponse,
   type GamerulesDocument,
   type HealthStatus,
@@ -387,12 +388,16 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     { schema: { body: SERVER_DETECT_SCHEMA } },
     async (request) => {
       const detected = detectServerFolder(request.body.folderPath);
-      return {
+      const detectedInfo: DetectedServerInfo = {
         path: request.body.folderPath,
         edition: detected ? detected.edition : null,
         serverType: detected ? detectedServerType(detected) : null,
         version: detected ? detected.version : null,
       };
+      // No jar at the folder root: the folder was recognized via a batch
+      // launcher. The launcher owns the java invocation, so note it for the UI.
+      if (detected?.isBatchLauncher) detectedInfo.isBatchLauncher = true;
+      return detectedInfo;
     },
   );
 

@@ -1,6 +1,26 @@
 import { useState } from 'react';
-import type { DetectedServerInfo, ServerRecord } from '@msc/shared-types';
+import type {
+  DetectedServerInfo,
+  ServerFlavor,
+  ServerRecord,
+} from '@msc/shared-types';
 import { api } from '../lib/api';
+
+/** Java flavors the user may pick when auto-detection is wrong. */
+const FLAVOR_OPTIONS: { value: ServerFlavor; label: string }[] = [
+  { value: 'vanilla', label: 'Vanilla' },
+  { value: 'fabric', label: 'Fabric' },
+  { value: 'forge', label: 'Forge' },
+  { value: 'paper', label: 'Paper' },
+];
+
+/** Human label for a server type string (bedrock or a flavor). */
+function serverTypeLabelFor(serverType: string | null, edition: DetectedServerInfo['edition'] | undefined): string {
+  if (edition === 'bedrock') return 'Bedrock';
+  if (!serverType) return '';
+  const opt = FLAVOR_OPTIONS.find((o) => o.value === serverType);
+  return opt?.label ?? serverType;
+}
 
 interface AddExistingServerFormProps {
   /** Last java.exe used; pre-fills the form for detected Java servers. */
@@ -38,6 +58,8 @@ export default function AddExistingServerForm({
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** Manual flavor pick; 'auto' = trust detection. */
+  const [flavorOverride, setFlavorOverride] = useState<ServerFlavor | 'auto'>('auto');
 
   const pickFolder = async (): Promise<void> => {
     setError(null);
@@ -53,6 +75,7 @@ export default function AddExistingServerForm({
       setJavaPath(null);
       setMemoryMb(1024);
       setPort(25565);
+      setFlavorOverride('auto');
       if (info.edition) {
         // Default the name to the folder name.
         const base = result.path.split(/[\\/]/).pop() ?? 'My Server';
@@ -74,15 +97,21 @@ export default function AddExistingServerForm({
     (detected.edition === 'bedrock' || acceptEula) &&
     !saving;
 
+  /** The flavor recorded for this server: manual override or the detected one. */
+  const effectiveServerType =
+    detected?.edition === 'java' && flavorOverride !== 'auto'
+      ? flavorOverride
+      : detected?.serverType ?? null;
+
   const addServer = async (): Promise<void> => {
-    if (!pickedPath || !detected?.edition || !detected.serverType) return;
+    if (!pickedPath || !detected?.edition || !effectiveServerType) return;
     setError(null);
     setSaving(true);
     try {
       const record = await api.createServer({
         name: name.trim(),
         edition: detected.edition,
-        serverType: detected.serverType,
+        serverType: effectiveServerType,
         folderPath: pickedPath,
         javaPath: detected.edition === 'java' ? javaPath : null,
         memoryMb: detected.edition === 'java' ? memoryMb : undefined,
@@ -104,7 +133,7 @@ export default function AddExistingServerForm({
   };
 
   const editionLabel = detected?.edition === 'bedrock' ? 'Bedrock' : 'Java';
-  const serverTypeLabel = detected?.serverType ?? '';
+  const serverTypeLabel = serverTypeLabelFor(effectiveServerType, detected?.edition);
 
   return (
     <div className="panel">
@@ -155,6 +184,38 @@ export default function AddExistingServerForm({
               <span className="muted">{serverTypeLabel}</span>
             </div>
           </div>
+
+          {detected.edition === 'java' && (
+            <div className="form-row">
+              <label className="form-label" htmlFor="add-existing-flavor">
+                Java flavor
+              </label>
+              <select
+                id="add-existing-flavor"
+                className="input"
+                value={flavorOverride}
+                onChange={(e) =>
+                  setFlavorOverride(e.target.value as ServerFlavor | 'auto')
+                }
+                disabled={saving}
+              >
+                <option value="auto">
+                  Auto ({serverTypeLabelFor(detected.serverType, 'java')})
+                </option>
+                {FLAVOR_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <p className="muted form-help">
+                Auto-detected from the jar name (fabric-server-launch.jar,
+                forge-*.jar, paper-*.jar, server.jar). If detection is wrong —
+                e.g. a renamed jar that's actually Forge — pick the right
+                flavor here so the correct jar is launched.
+              </p>
+            </div>
+          )}
 
           <div className="form-row">
             <label className="form-label" htmlFor="add-existing-name">

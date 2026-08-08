@@ -7,6 +7,7 @@ import {
   detectedServerLabel,
   detectedServerType,
   sniffVersionFromJar,
+  sniffVersionFromLauncher,
 } from '../server-detector';
 
 const tmpDirs: string[] = [];
@@ -51,6 +52,42 @@ describe('detectServerFolder', () => {
     expect(detectServerFolder(dir)).toEqual({ edition: 'java', flavor: 'vanilla', version: null });
   });
 
+  it('detects a Java server from a batch launcher (start.bat)', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(
+      path.join(dir, 'start.bat'),
+      '@echo off\r\njava -Xmx2G -jar libraries/net/minecraft/server/1.21.1/server.jar nogui\r\n',
+    );
+    const detected = detectServerFolder(dir);
+    expect(detected).toEqual({
+      edition: 'java',
+      flavor: 'vanilla',
+      version: '1.21.1',
+      isBatchLauncher: true,
+    });
+  });
+
+  it('detects a Java server from run.bat without a versioned jar', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'run.bat'), '@echo off\r\njava -jar server.jar nogui\r\n');
+    const detected = detectServerFolder(dir);
+    expect(detected?.edition).toBe('java');
+    expect(detected?.isBatchLauncher).toBe(true);
+    expect(detected?.version).toBeNull();
+  });
+
+  it('detects a batch launcher case-insensitively', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'START.BAT'), '@echo off\r\njava -jar server.jar\r\n');
+    expect(detectServerFolder(dir)?.isBatchLauncher).toBe(true);
+  });
+
+  it('returns null for a folder with only an unrecognized bat', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'something.bat'), 'echo hi');
+    expect(detectServerFolder(dir)).toBeNull();
+  });
+
   it('returns null for multiple non-recognized jars', () => {
     const dir = makeTempDir();
     fs.writeFileSync(path.join(dir, 'a.jar'), 'x');
@@ -74,6 +111,33 @@ describe('detectServerFolder', () => {
       flavor: 'forge',
       version: '1.21.1',
     });
+  });
+
+  it('treats a modern forge installer + server.jar + run.bat as a batch-launcher pack', () => {
+    // Regression: a ServerPackCreator-style Forge pack ships
+    // forge-<mc>-<build>-installer.jar, a small server.jar shim, and run.bat.
+    // The installer is not a runnable server, and the shim server.jar is not
+    // vanilla — the pack is launched by run.bat.
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'forge-1.19.2-43.3.5-installer.jar'), 'x');
+    fs.writeFileSync(path.join(dir, 'server.jar'), 'shim');
+    fs.writeFileSync(
+      path.join(dir, 'run.bat'),
+      '@echo off\r\njava @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.19.2-43.3.5/win_args.txt %*\r\n',
+    );
+    const detected = detectServerFolder(dir);
+    expect(detected).toEqual({
+      edition: 'java',
+      flavor: 'vanilla',
+      version: null,
+      isBatchLauncher: true,
+    });
+  });
+
+  it('does not treat a lone modern forge installer as a server', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'forge-1.19.2-43.3.5-installer.jar'), 'x');
+    expect(detectServerFolder(dir)).toBeNull();
   });
 
   it('sniffs the version from an old 1.7.10 forge universal jar', () => {
@@ -152,6 +216,29 @@ describe('sniffVersionFromJar', () => {
     expect(sniffVersionFromJar('server.jar')).toBeNull();
     expect(sniffVersionFromJar('fabric-server-launch.jar')).toBeNull();
     expect(sniffVersionFromJar('forge-installer.jar')).toBeNull();
+  });
+});
+
+describe('sniffVersionFromLauncher', () => {
+  it('reads a versioned jar from the launcher content', () => {
+    const dir = makeTempDir();
+    const launcher = path.join(dir, 'start.bat');
+    fs.writeFileSync(
+      launcher,
+      '@echo off\r\njava -Xmx2G -jar libraries/net/minecraft/server/1.7.10/server.jar nogui\r\n',
+    );
+    expect(sniffVersionFromLauncher(launcher)).toBe('1.7.10');
+  });
+
+  it('returns null for a missing or unreadable launcher', () => {
+    expect(sniffVersionFromLauncher(path.join(makeTempDir(), 'nope.bat'))).toBeNull();
+  });
+
+  it('returns null when the launcher names no versioned jar', () => {
+    const dir = makeTempDir();
+    const launcher = path.join(dir, 'start.bat');
+    fs.writeFileSync(launcher, '@echo off\r\njava -jar server.jar nogui\r\n');
+    expect(sniffVersionFromLauncher(launcher)).toBeNull();
   });
 });
 

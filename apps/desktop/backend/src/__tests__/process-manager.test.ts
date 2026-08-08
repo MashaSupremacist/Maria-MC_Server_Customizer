@@ -96,6 +96,16 @@ describe('findServerJar', () => {
     expect(findServerJar(tempDir)).toBeNull();
   });
 
+  it('ignores a modern forge installer jar (forge-<mc>-<build>-installer.jar)', () => {
+    // Regression: forge-1.19.2-43.3.5-installer.jar is a bootstrap GUI, not a
+    // runnable server. It must not be treated as the forge server jar.
+    fs.writeFileSync(path.join(tempDir, 'forge-1.19.2-43.3.5-installer.jar'), 'x');
+    expect(findServerJar(tempDir, 'forge')).toBeNull();
+    // A real forge server jar alongside it still wins.
+    fs.writeFileSync(path.join(tempDir, 'forge-1.19.2-43.3.5.jar'), 'x');
+    expect(findServerJar(tempDir, 'forge')).toBe(path.join(tempDir, 'forge-1.19.2-43.3.5.jar'));
+  });
+
   it('returns null when the folder does not exist', () => {
     expect(findServerJar(path.join(tempDir, 'missing'))).toBeNull();
   });
@@ -185,6 +195,87 @@ describe('ProcessManager', () => {
     writeFakeServer();
     const err = manager.start(makeServerConfig());
     expect(err).toBeNull();
+    manager.stop();
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
+
+  it('launches a batch launcher (start.bat) via cmd /c with no jar and no java', async () => {
+    // A server-pack folder with only a start.bat (no server.jar, no eula.txt,
+    // no configured java). The script owns the java invocation.
+    fs.writeFileSync(path.join(tempDir, 'fake-server.js'), FAKE_SERVER_SCRIPT);
+    fs.writeFileSync(
+      path.join(tempDir, 'start.bat'),
+      `@echo off\r\nnode "%~dp0fake-server.js" %*\r\n`,
+    );
+    const err = manager.start(
+      makeServerConfig({
+        javaPath: '',
+        jvmArgs: [],
+        folderPath: tempDir,
+      }),
+    );
+    expect(err).toBeNull();
+    await waitFor(() => logs.some((l) => l.includes('Done (1.234s)')));
+    expect(states.some((s) => s.state === 'online')).toBe(true);
+    // Started via the batch launcher, not java -jar.
+    expect(logs.some((l) => l.includes('via batch launcher'))).toBe(true);
+    manager.stop();
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
+
+  it('launches a batch launcher whose folder path contains spaces', async () => {
+    // Regression: paths like "C:\Servers\Minecraft Servers\CARP\start.bat"
+    // were passed to cmd /c unquoted, so cmd split on the space and tried to
+    // run "C:\Servers\Minecraft". The launcher must be invoked by filename
+    // with the server folder as cwd.
+    const spaced = path.join(tempDir, 'My Servers', 'CARP');
+    fs.mkdirSync(spaced, { recursive: true });
+    fs.writeFileSync(path.join(spaced, 'fake-server.js'), FAKE_SERVER_SCRIPT);
+    fs.writeFileSync(
+      path.join(spaced, 'start.bat'),
+      `@echo off\r\nnode "%~dp0fake-server.js" %*\r\n`,
+    );
+    const err = manager.start(
+      makeServerConfig({
+        javaPath: '',
+        jvmArgs: [],
+        folderPath: spaced,
+      }),
+    );
+    expect(err).toBeNull();
+    await waitFor(() => logs.some((l) => l.includes('Done (1.234s)')));
+    expect(states.some((s) => s.state === 'online')).toBe(true);
+    manager.stop();
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
+
+  it('puts the configured java bin on PATH for a batch launcher', async () => {
+    // Regression: run.bat calls bare `java`, which resolves via PATH. When a
+    // javaPath is configured, its bin folder must come first so the pack uses
+    // the selected runtime instead of whatever the system PATH provides.
+    const fakeBin = path.join(tempDir, 'fake-java', 'bin');
+    fs.mkdirSync(fakeBin, { recursive: true });
+    const fakeJava = path.join(fakeBin, 'java.cmd');
+    const marker = path.join(tempDir, 'fake-java-invoked.txt');
+    // The fake java.cmd writes a marker file when invoked via PATH.
+    fs.writeFileSync(fakeJava, `@echo off\r\n> "${marker}" echo ran\r\n`);
+    fs.writeFileSync(
+      path.join(tempDir, 'start.bat'),
+      // The launcher calls bare `java` exactly like a real pack's run.bat.
+      '@echo off\r\njava\r\n',
+    );
+    const err = manager.start(
+      makeServerConfig({
+        javaPath: fakeJava,
+        jvmArgs: [],
+        folderPath: tempDir,
+      }),
+    );
+    expect(err).toBeNull();
+    // The bare `java` in start.bat resolved to the configured fake runtime,
+    // which wrote the marker. A marker file is used rather than log capture
+    // because a child .cmd's stdout isn't guaranteed to reach the parent pipe.
+    await waitFor(() => fs.existsSync(marker), 10000);
     manager.stop();
     await waitFor(() => manager.runningServerId === null, 5000);
   });
@@ -444,6 +535,22 @@ describe('findServerExecutable', () => {
   it('delegates to findServerJar for the java edition', () => {
     fs.writeFileSync(path.join(tempDir, 'server.jar'), 'x');
     expect(findServerExecutable(tempDir, 'java')).toBe(path.join(tempDir, 'server.jar'));
+  });
+
+  it('falls back to a batch launcher when no jar exists', () => {
+    fs.writeFileSync(path.join(tempDir, 'start.bat'), '@echo off');
+    expect(findServerExecutable(tempDir, 'java')).toBe(path.join(tempDir, 'start.bat'));
+  });
+
+  it('prefers a jar over a batch launcher when both exist', () => {
+    fs.writeFileSync(path.join(tempDir, 'server.jar'), 'x');
+    fs.writeFileSync(path.join(tempDir, 'start.bat'), '@echo off');
+    expect(findServerExecutable(tempDir, 'java')).toBe(path.join(tempDir, 'server.jar'));
+  });
+
+  it('returns null when neither a jar nor a batch launcher exists', () => {
+    fs.writeFileSync(path.join(tempDir, 'readme.txt'), 'hi');
+    expect(findServerExecutable(tempDir, 'java')).toBeNull();
   });
 });
 
