@@ -1,8 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import yauzl from 'yauzl';
+import crypto from 'node:crypto';
 import type { PackEntry, PackKind, PackListResponse } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
+import { requireServerEdition } from './server-edition';
+import { walkZip, writeEntryStream } from './zip-utils';
+import {
+  ServerOperationConflictError,
+  type ServerOperationCoordinator,
+} from './server-operation-coordinator';
 
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1 GB safety cap
 
@@ -18,16 +24,21 @@ export interface OnlineStatus {
  */
 export class PackService {
   private readonly db: DatabaseResult;
+  private readonly coordinator: ServerOperationCoordinator | null;
   private isOnline: OnlineStatus;
 
-  constructor(db: DatabaseResult, isOnline: OnlineStatus) {
+  constructor(
+    db: DatabaseResult,
+    isOnline: OnlineStatus,
+    coordinator: ServerOperationCoordinator | null = null,
+  ) {
     this.db = db;
     this.isOnline = isOnline;
+    this.coordinator = coordinator;
   }
 
   private packDir(serverId: string, kind: PackKind): string {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'bedrock');
     return path.join(record.folderPath, kind === 'behavior' ? 'behavior_packs' : 'resource_packs');
   }
 
@@ -81,58 +92,101 @@ export class PackService {
   async upload(
     serverId: string,
     kind: PackKind,
-    files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
+    filePaths: string[],
   ): Promise<{ ok: boolean; error?: string; added: string[] }> {
-    const record = this.db.getServer(serverId);
-    if (!record) return { ok: false, error: 'Server not found', added: [] };
+    let operationId: string | null = null;
+    try {
+      const operation = this.coordinator?.acquire(serverId, 'pack-mutation');
+      operationId = operation?.operationId ?? null;
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { ok: false, error: error.message, added: [] };
+      }
+      throw error;
+    }
+    try {
+      return await this.uploadUnlocked(serverId, kind, filePaths);
+    } finally {
+      if (operationId) this.coordinator?.release(serverId, operationId);
+    }
+  }
+
+  private async uploadUnlocked(
+    serverId: string,
+    kind: PackKind,
+    filePaths: string[],
+  ): Promise<{ ok: boolean; error?: string; added: string[] }> {
+    requireServerEdition(this.db, serverId, 'bedrock');
     if (this.isOnline(serverId)) {
       return { ok: false, error: 'Stop the server before changing packs', added: [] };
     }
     const dir = this.packDir(serverId, kind);
     fs.mkdirSync(dir, { recursive: true });
+    const staging = path.join(dir, `.msc-pack-import-${crypto.randomUUID()}`);
+    fs.mkdirSync(staging, { recursive: true });
     const added: string[] = [];
-    for (const file of files) {
-      const base = path.basename(file.name);
-      if (!/\.(mcpack|zip|mcworld|mcaddon)$/i.test(base)) {
-        return {
-          ok: false,
-          error: `Only .mcpack/.zip/.mcworld/.mcaddon files are allowed (${base})`,
-          added: [],
-        };
+    const committed: string[] = [];
+    try {
+      for (const sourcePath of filePaths) {
+        const before = fs.lstatSync(sourcePath);
+        const base = path.basename(sourcePath);
+        if (!before.isFile() || before.isSymbolicLink()) throw new Error(`Not a regular file: ${base}`);
+        if (!/\.(mcpack|zip|mcworld|mcaddon)$/i.test(base)) {
+          throw new Error(`Only .mcpack/.zip/.mcworld/.mcaddon files are allowed (${base})`);
+        }
+        if (before.size <= 0 || before.size > MAX_UPLOAD_BYTES) {
+          throw new Error(before.size <= 0 ? `File is empty: ${base}` : `${base} exceeds the 1 GB upload limit`);
+        }
+        const folderName = base.replace(/\.(mcpack|zip|mcworld|mcaddon)$/i, '');
+        if (fs.existsSync(path.join(dir, folderName))) throw new Error(`A pack named "${folderName}" already exists`);
+        const stagedArchive = path.join(staging, base);
+        const stagedFolder = path.join(staging, folderName);
+        await fs.promises.copyFile(sourcePath, stagedArchive, fs.constants.COPYFILE_EXCL);
+        const after = fs.lstatSync(sourcePath);
+        if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+          throw new Error(`File changed while it was being imported: ${base}`);
+        }
+        await extractZipTo(stagedArchive, stagedFolder);
+        fs.rmSync(stagedArchive, { force: true });
+        if (!containsFile(stagedFolder, 'manifest.json')) {
+          throw new Error(`Pack archive has no manifest.json: ${base}`);
+        }
+        added.push(folderName);
       }
-      if (file.sizeBytes > MAX_UPLOAD_BYTES) {
-        return { ok: false, error: `${base} exceeds the 1 GB upload limit`, added: [] };
+      for (const folderName of added) {
+        const destination = path.join(dir, folderName);
+        await fs.promises.rename(path.join(staging, folderName), destination);
+        committed.push(destination);
       }
-      if (!file.contentBase64) {
-        return { ok: false, error: `File is empty: ${base}`, added: [] };
-      }
-      // Extract into a subfolder named after the archive (sans extension).
-      const folderName = base.replace(/\.(mcpack|zip|mcworld|mcaddon)$/i, '');
-      const destFolder = path.join(dir, folderName);
-      if (fs.existsSync(destFolder)) {
-        return { ok: false, error: `A pack named "${folderName}" already exists`, added: [] };
-      }
-      const tmpZip = path.join(dir, `.upload-${Date.now()}-${base}`);
-      fs.writeFileSync(tmpZip, Buffer.from(file.contentBase64, 'base64'));
-      try {
-        await extractZipTo(tmpZip, destFolder);
-      } catch (err) {
-        fs.rmSync(tmpZip, { force: true });
-        fs.rmSync(destFolder, { recursive: true, force: true });
-        return {
-          ok: false,
-          error: err instanceof Error ? err.message : 'Failed to extract pack archive',
-          added: [],
-        };
-      }
-      fs.rmSync(tmpZip, { force: true });
-      added.push(folderName);
+      return { ok: true, added };
+    } catch (error) {
+      for (const destination of committed) fs.rmSync(destination, { recursive: true, force: true });
+      return { ok: false, error: error instanceof Error ? error.message : String(error), added: [] };
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
     }
-    return { ok: true, added };
   }
 
   /** Delete a pack entry (folder or file). */
   delete(serverId: string, kind: PackKind, name: string): { ok: boolean; error?: string } {
+    let operationId: string | null = null;
+    try {
+      const operation = this.coordinator?.acquire(serverId, 'pack-mutation');
+      operationId = operation?.operationId ?? null;
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { ok: false, error: error.message };
+      }
+      throw error;
+    }
+    try {
+      return this.deleteUnlocked(serverId, kind, name);
+    } finally {
+      if (operationId) this.coordinator?.release(serverId, operationId);
+    }
+  }
+
+  private deleteUnlocked(serverId: string, kind: PackKind, name: string): { ok: boolean; error?: string } {
     if (path.basename(name) !== name || name.includes('/') || name.includes('\\')) {
       return { ok: false, error: 'Invalid pack name' };
     }
@@ -166,67 +220,21 @@ function countFiles(dir: string): number {
   return count;
 }
 
+function containsFile(root: string, wantedName: string): boolean {
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase() === wantedName.toLowerCase()) return true;
+    if (entry.isDirectory() && containsFile(full, wantedName)) return true;
+  }
+  return false;
+}
+
 /** Extract a ZIP into destFolder, rejecting paths that escape it. */
-function extractZipTo(zipPath: string, destFolder: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
-      if (err || !zipfile) {
-        reject(err ?? new Error('Failed to open pack archive'));
-        return;
-      }
-      let pending = 0;
-      zipfile.readEntry();
-      zipfile.on('entry', (entry: yauzl.Entry) => {
-        const safety = safeEntryTarget(destFolder, entry.fileName);
-        if (!safety) {
-          zipfile.close();
-          reject(new Error(`Unsafe path in archive: ${entry.fileName}`));
-          return;
-        }
-        const target = safety;
-        if (/\/$/.test(entry.fileName)) {
-          fs.mkdirSync(target, { recursive: true });
-          zipfile.readEntry();
-          return;
-        }
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-        pending += 1;
-        zipfile.openReadStream(entry, (streamErr, stream) => {
-          if (streamErr || !stream) {
-            zipfile.close();
-            reject(streamErr ?? new Error('Failed to open pack archive entry'));
-            return;
-          }
-          const out = fs.createWriteStream(target);
-          stream.on('error', (e) => {
-            out.destroy();
-            zipfile.close();
-            reject(e);
-          });
-          out.on('error', (e) => {
-            zipfile.close();
-            reject(e);
-          });
-          out.on('close', () => {
-            pending -= 1;
-            zipfile.readEntry();
-          });
-          stream.pipe(out);
-        });
-      });
-      zipfile.on('end', () => {
-        const check = (): void => {
-          if (pending === 0) {
-            zipfile.close();
-            resolve();
-          } else {
-            setTimeout(check, 10);
-          }
-        };
-        check();
-      });
-      zipfile.on('error', (e) => reject(e));
-    });
+async function extractZipTo(zipPath: string, destFolder: string): Promise<void> {
+  await walkZip(zipPath, async (entry, stream) => {
+    const target = safeEntryTarget(destFolder, entry.fileName);
+    if (!target) throw new Error(`Unsafe path in archive: ${entry.fileName}`);
+    await writeEntryStream(stream, target);
   });
 }
 

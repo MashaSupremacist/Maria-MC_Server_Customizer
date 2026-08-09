@@ -12,6 +12,10 @@ import {
   ProcessManager,
   type ServerConfig,
 } from './process-manager';
+import {
+  ServerOperationConflictError,
+  ServerOperationCoordinator,
+} from './server-operation-coordinator';
 
 export type WsBroadcast = (event: WsServerEvent) => void;
 
@@ -22,7 +26,7 @@ export type JavaValidator = (
 ) => Promise<StartServerError | null>;
 
 /** Resolves a java.exe when a server record has none configured. */
-export type JavaPathResolver = () => Promise<string | null>;
+export type JavaPathResolver = (minecraftVersion: string | null) => Promise<string | null>;
 
 /**
  * Bridges the ProcessManager (which manages the single running process) to
@@ -35,17 +39,20 @@ export class ServerManagerService {
   private readonly processManager: ProcessManager;
   private readonly validateJava: JavaValidator | null;
   private readonly resolveJavaPath: JavaPathResolver | null;
+  private readonly coordinator: ServerOperationCoordinator | null;
 
   constructor(
     db: DatabaseResult,
     broadcast: WsBroadcast,
     validateJava: JavaValidator | null = null,
     resolveJavaPath: JavaPathResolver | null = null,
+    coordinator: ServerOperationCoordinator | null = null,
   ) {
     this.db = db;
     this.broadcast = broadcast;
     this.validateJava = validateJava;
     this.resolveJavaPath = resolveJavaPath;
+    this.coordinator = coordinator;
     this.processManager = new ProcessManager({
       onState: (serverId, state, exitCode) => {
         this.broadcast({
@@ -77,6 +84,18 @@ export class ServerManagerService {
   }
 
   async start(serverId: string): Promise<StartServerError | null> {
+    if (!this.coordinator) return this.startUnlocked(serverId);
+    try {
+      return await this.coordinator.run(serverId, 'start', () => this.startUnlocked(serverId));
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { code: 'server-busy', message: error.message };
+      }
+      throw error;
+    }
+  }
+
+  private async startUnlocked(serverId: string): Promise<StartServerError | null> {
     const record = this.db.getServer(serverId);
     if (!record) {
       return { code: 'not-found', message: `No server record with id ${serverId}` };
@@ -89,7 +108,7 @@ export class ServerManagerService {
     if (record.edition !== 'bedrock' && !isBatchLauncher) {
       if (!record.javaPath) {
         if (this.resolveJavaPath) {
-          const resolved = await this.resolveJavaPath();
+          const resolved = await this.resolveJavaPath(record.version);
           if (resolved) {
             this.db.updateServer(serverId, { javaPath: resolved });
             record.javaPath = resolved;
@@ -140,12 +159,16 @@ export class ServerManagerService {
     return this.processManager.start(config);
   }
 
-  stop(): void {
+  stop(serverId: string): boolean {
+    if (this.processManager.runningServerId !== serverId) return false;
     this.processManager.stop();
+    return true;
   }
 
-  forceKill(): void {
+  forceKill(serverId: string): boolean {
+    if (this.processManager.runningServerId !== serverId) return false;
     this.processManager.forceKill();
+    return true;
   }
 
   async restart(serverId: string): Promise<StartServerError | null> {
@@ -184,6 +207,10 @@ export class ServerManagerService {
   /** Ensure the managed server is stopped when the backend shuts down. */
   shutdown(): void {
     this.processManager.shutdown();
+  }
+
+  async shutdownGracefully(gracefulTimeoutMs?: number, forceTimeoutMs?: number): Promise<void> {
+    await this.processManager.shutdownGracefully(gracefulTimeoutMs, forceTimeoutMs);
   }
 }
 

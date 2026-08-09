@@ -17,6 +17,12 @@ import {
   sniffVersionFromLauncherContent,
 } from './server-detector';
 import { requiredJavaForMinecraft, javaLabel } from './java-service';
+import { findServerExecutable } from './process-manager';
+import {
+  findCommonArchiveRoot,
+  isRootBatchLauncherEntry,
+  stripArchiveRoot,
+} from './launch-target';
 import {
   extractZipEntryToFile,
   listZipEntries,
@@ -239,6 +245,11 @@ export class PackInstallerService {
         port: request.port ?? DEFAULT_PORT,
       });
 
+      if (!findServerExecutable(serverFolder, 'java', flavor)) {
+        this.cleanup(serverFolder);
+        return this.fail('The extracted pack does not contain a runnable root server JAR or launcher.');
+      }
+
       const record = this.db.createServer({
         name: request.name.trim(),
         edition: 'java',
@@ -274,13 +285,18 @@ export class PackInstallerService {
       hasLauncher: boolean;
     }) | null
   > {
-    const entries = await listZipEntries(filePath);
-    if (!entries) return null;
+    const archiveEntries = await listZipEntries(filePath);
+    if (!archiveEntries) return null;
+    const commonRoot = findCommonArchiveRoot(archiveEntries);
+    const entries = archiveEntries
+      .map((entry) => stripArchiveRoot(entry, commonRoot))
+      .filter(Boolean);
+    const sourceEntry = (entry: string): string => `${commonRoot ?? ''}${entry}`;
 
     let info: InternalPackInfo | null = null;
 
     if (entries.includes('modrinth.index.json')) {
-      const text = await readZipEntryText(filePath, 'modrinth.index.json');
+      const text = await readZipEntryText(filePath, sourceEntry('modrinth.index.json'));
       if (text) {
         try {
           const index = JSON.parse(text) as ModrinthIndex;
@@ -299,7 +315,7 @@ export class PackInstallerService {
     }
 
     if (!info && entries.includes('manifest.json')) {
-      const text = await readZipEntryText(filePath, 'manifest.json');
+      const text = await readZipEntryText(filePath, sourceEntry('manifest.json'));
       if (text) {
         try {
           const manifest = JSON.parse(text) as CurseforgeManifest;
@@ -355,7 +371,7 @@ export class PackInstallerService {
     if (!info || (entries.some((e) => e === 'mods' || e.startsWith('mods/')) && !info.loader)) {
       const hasMods = entries.some((e) => e === 'mods' || e.startsWith('mods/'));
       if (hasMods) {
-        const sniffed = await sniffModsForLoader(filePath, entries);
+        const sniffed = await sniffModsForLoader(filePath, entries, commonRoot);
         const jarMc = entries
           .filter((e) => e.startsWith('mods/') && e.endsWith('.jar') && !e.endsWith('/'))
           .map((e) => sniffVersionFromJar(path.basename(e)))
@@ -376,7 +392,7 @@ export class PackInstallerService {
     if (!info || (hasLauncherCandidates(entries) && !info.mcVersion)) {
       const launcherEntry = entries.find((e) => isBatchLauncherEntry(e));
       if (launcherEntry) {
-        const content = await readZipEntryText(filePath, launcherEntry);
+        const content = await readZipEntryText(filePath, sourceEntry(launcherEntry));
         const mcVersion = content ? sniffVersionFromLauncherContent(content) : null;
         info = {
           kind: 'zip',
@@ -401,15 +417,7 @@ export class PackInstallerService {
         return base.startsWith('forge-') && base !== 'forge-installer.jar' && base.includes('universal');
       });
     const hasForgeInstaller = entries.some((e) => path.basename(e) === 'forge-installer.jar');
-    const hasLauncher = entries.some((e) => {
-      const base = path.basename(e).toLowerCase();
-      return (
-        base.endsWith('.bat') &&
-        ['start', 'run', 'start-server', 'startserver', 'launch', 'server'].includes(
-          base.replace(/\.bat$/, ''),
-        )
-      );
-    });
+    const hasLauncher = entries.some(isBatchLauncherEntry);
 
     return {
       ...info,
@@ -435,8 +443,12 @@ export class PackInstallerService {
     let filesCopied = 0;
     let skipped = 0;
 
-    await walkZip(filePath, (entry, stream) => {
-      const raw = entry.fileName.replace(/\\/g, '/');
+    const archiveEntries = await listZipEntries(filePath);
+    if (!archiveEntries) return { modsAdded, filesCopied, skipped, error: 'Pack archive could not be read.' };
+    const commonRoot = findCommonArchiveRoot(archiveEntries);
+
+    await walkZip(filePath, async (entry, stream) => {
+      const raw = stripArchiveRoot(entry.fileName, commonRoot);
       let rel = kind === 'mrpack' ? stripPrefix(raw, 'overrides/') : raw;
       if (kind === 'zip') rel = stripPrefix(rel, 'overrides/');
       if (!rel || rel.endsWith('/')) {
@@ -470,7 +482,7 @@ export class PackInstallerService {
           stream.resume();
           return;
         }
-        writeEntryStream(stream, dest);
+        await writeEntryStream(stream, dest);
         modsAdded += 1;
         return;
       }
@@ -478,7 +490,12 @@ export class PackInstallerService {
       // Everything else (config, libraries/, the pack's own runnable jar,
       // a forge-installer.jar) lands in the folder root. A forge-installer
       // is either run by the install step or ignored by findServerJar.
-      writeEntryStream(stream, target);
+      if (fs.existsSync(target)) {
+        skipped += 1;
+        stream.resume();
+        return;
+      }
+      await writeEntryStream(stream, target);
       filesCopied += 1;
     });
 
@@ -523,6 +540,7 @@ export class PackInstallerService {
 async function sniffModsForLoader(
   filePath: string,
   entries: string[],
+  commonRoot: string | null = null,
 ): Promise<{ loader?: 'forge' | 'fabric'; mcVersion?: string }> {
   const MOD_SNIFF_LIMIT = 5;
   const modJars = entries
@@ -538,7 +556,7 @@ async function sniffModsForLoader(
   try {
     for (const jarEntry of modJars) {
       const jarPath = path.join(scratch, path.basename(jarEntry));
-      const extracted = await extractZipEntryToFile(filePath, jarEntry, jarPath);
+      const extracted = await extractZipEntryToFile(filePath, `${commonRoot ?? ''}${jarEntry}`, jarPath);
       if (!extracted) continue;
 
       // Fabric mods carry fabric.mod.json at the JAR root.
@@ -609,21 +627,9 @@ function writeServerProperties(
   fs.writeFileSync(filePath, lines.join('\n') + '\n');
 }
 
-/** Names of batch launcher files recognized as server launch scripts. */
-const BATCH_LAUNCHER_NAMES = new Set([
-  'start.bat',
-  'run.bat',
-  'start-server.bat',
-  'startserver.bat',
-  'launch.bat',
-  'server.bat',
-]);
-
 /** True when a zip entry path is a recognized batch launcher at its root. */
 function isBatchLauncherEntry(entry: string): boolean {
-  const normalized = entry.replace(/\\/g, '/');
-  const base = normalized.split('/').pop()?.toLowerCase() ?? '';
-  return BATCH_LAUNCHER_NAMES.has(base) && normalized.indexOf('/') === normalized.lastIndexOf('/') || false;
+  return isRootBatchLauncherEntry(entry);
 }
 
 /** True when the zip contains any recognized batch launcher entry. */

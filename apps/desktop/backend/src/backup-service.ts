@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import yazl from 'yazl';
-import yauzl from 'yauzl';
 import type {
   BackupEntry,
   BackupProgress,
@@ -12,6 +11,21 @@ import type {
 } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
 import type { WsBroadcast } from './world-service';
+import {
+  FilesystemTransactionCanceledError,
+  replaceDirectoryAtomically,
+} from './fs-transaction';
+import { SERVER_OWNERSHIP_MARKER } from './path-policy';
+import {
+  ArchivePolicyError,
+  safeJoin,
+  walkZip,
+  writeEntryStream,
+} from './zip-utils';
+import {
+  ServerOperationConflictError,
+  type ServerOperationCoordinator,
+} from './server-operation-coordinator';
 
 /** Result of starting a backup operation. */
 export interface BackupOperationStart {
@@ -23,6 +37,19 @@ export interface BackupOperationStart {
 /** Default number of backups to keep per server. */
 export const DEFAULT_RETENTION = 10;
 
+interface BackupOperationState {
+  cancelRequested: boolean;
+  controller: AbortController;
+  serverId: string;
+}
+
+class InvalidBackupArchiveError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'InvalidBackupArchiveError';
+  }
+}
+
 /**
  * Creates ZIP backups of a server folder, lists/restores/deletes them, and
  * enforces a per-server retention limit. Backups live outside the active
@@ -32,12 +59,19 @@ export class BackupService {
   private readonly db: DatabaseResult;
   private readonly broadcast: WsBroadcast;
   private readonly backupsDir: string;
-  private operations = new Map<string, { cancelRequested: boolean }>();
+  private readonly coordinator: ServerOperationCoordinator | null;
+  private operations = new Map<string, BackupOperationState>();
 
-  constructor(db: DatabaseResult, broadcast: WsBroadcast, backupsDir: string) {
+  constructor(
+    db: DatabaseResult,
+    broadcast: WsBroadcast,
+    backupsDir: string,
+    coordinator: ServerOperationCoordinator | null = null,
+  ) {
     this.db = db;
     this.broadcast = broadcast;
     this.backupsDir = backupsDir;
+    this.coordinator = coordinator;
     fs.mkdirSync(this.backupsDir, { recursive: true });
   }
 
@@ -71,7 +105,19 @@ export class BackupService {
     }
 
     const operationId = crypto.randomUUID();
-    this.operations.set(operationId, { cancelRequested: false });
+    try {
+      this.coordinator?.acquire(request.serverId, 'backup', operationId);
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { operationId: '', error: error.message };
+      }
+      throw error;
+    }
+    this.operations.set(operationId, {
+      cancelRequested: false,
+      controller: new AbortController(),
+      serverId: request.serverId,
+    });
     void this.runCreate(operationId, request, record.folderPath).catch(
       (err: unknown) => {
         this.finish(operationId, {
@@ -81,7 +127,9 @@ export class BackupService {
           errorCode: 'io',
         });
       },
-    );
+    ).finally(() => {
+      this.coordinator?.release(request.serverId, operationId);
+    });
     return { operationId };
   }
 
@@ -89,9 +137,20 @@ export class BackupService {
   delete(backupId: string): boolean {
     const row = this.db.getBackup(backupId);
     if (!row) return false;
-    this.db.deleteBackup(backupId);
-    fs.rmSync(row.filePath, { force: true });
-    return true;
+    const operationId = crypto.randomUUID();
+    this.coordinator?.acquire(row.serverId, 'backup', operationId);
+    try {
+      return this.deleteUnlocked(row.id, row.filePath);
+    } finally {
+      this.coordinator?.release(row.serverId, operationId);
+    }
+  }
+
+  private deleteUnlocked(backupId: string, filePath: string): boolean {
+    // Preserve the database reference if removing the archive fails so the
+    // orphan remains visible and the failure is not reported as success.
+    fs.rmSync(filePath, { force: true });
+    return this.db.deleteBackup(backupId);
   }
 
   /** Restore a backup into the server folder (replaces the current state). */
@@ -111,17 +170,34 @@ export class BackupService {
     }
 
     const operationId = crypto.randomUUID();
-    this.operations.set(operationId, { cancelRequested: false });
+    try {
+      this.coordinator?.acquire(row.serverId, 'restore', operationId);
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { operationId: '', error: error.message };
+      }
+      throw error;
+    }
+    this.operations.set(operationId, {
+      cancelRequested: false,
+      controller: new AbortController(),
+      serverId: row.serverId,
+    });
     void this.runRestore(operationId, row, record.folderPath).catch(
       (err: unknown) => {
         this.finish(operationId, {
           status: 'failed',
           percent: null,
           message: err instanceof Error ? err.message : String(err),
-          errorCode: 'io',
+          errorCode:
+            err instanceof InvalidBackupArchiveError || err instanceof ArchivePolicyError
+              ? 'invalid-archive'
+              : 'io',
         });
       },
-    );
+    ).finally(() => {
+      this.coordinator?.release(row.serverId, operationId);
+    });
     return { operationId };
   }
 
@@ -129,7 +205,14 @@ export class BackupService {
   cancel(operationId: string): boolean {
     const entry = this.operations.get(operationId);
     if (!entry) return false;
+    if (
+      this.coordinator &&
+      !this.coordinator.requestCancel(entry.serverId, operationId)
+    ) {
+      return false;
+    }
     entry.cancelRequested = true;
+    entry.controller.abort();
     return true;
   }
 
@@ -238,74 +321,81 @@ export class BackupService {
       return;
     }
 
-    this.emit(operationId, {
-      status: 'restoring',
-      percent: 0,
-      message: 'Verifying backup archive…',
-    });
-
-    await validateZip(row.filePath);
-
-    if (isCanceled()) {
-      this.finish(operationId, {
-        status: 'canceled',
-        percent: null,
-        message: 'Restore canceled',
-        errorCode: 'cancelled',
+    try {
+      this.emit(operationId, {
+        status: 'restoring',
+        percent: 0,
+        message: 'Verifying backup archive…',
       });
-      return;
-    }
 
-    // Safety net: back up the current state before replacing it.
-    const safetyName = `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;
-    const safetyPath = path.join(this.backupsDir, safetyName);
-    await createZip(serverFolder, safetyPath, () => undefined, () => false);
+      const inspection = await inspectBackupArchive(row.filePath, entry?.controller.signal);
+      if (inspection.fileCount === 0) {
+        throw new InvalidBackupArchiveError('Invalid backup archive: archive contains no files');
+      }
 
-    if (!fs.existsSync(serverFolder) || fs.readdirSync(serverFolder).length === 0) {
-      // Nothing to preserve; drop the safety backup.
-      fs.rmSync(safetyPath, { force: true });
-    }
-
-    this.emit(operationId, {
-      status: 'restoring',
-      percent: 30,
-      message: 'Restoring backup…',
-    });
-
-    // Remove current contents so the archive replaces the folder state.
-    for (const entryName of fs.readdirSync(serverFolder)) {
-      fs.rmSync(path.join(serverFolder, entryName), { recursive: true, force: true });
-    }
-
-    await extractZip(row.filePath, serverFolder, (done, total) => {
-      const percent = 30 + Math.min(70, Math.round((done / total) * 70));
-      this.emit(operationId, { status: 'restoring', percent, message: 'Restoring backup…' });
-    }, isCanceled);
-
-    if (isCanceled()) {
-      this.finish(operationId, {
-        status: 'canceled',
-        percent: null,
-        message: 'Restore canceled',
-        errorCode: 'cancelled',
+      this.emit(operationId, {
+        status: 'restoring',
+        percent: 30,
+        message: 'Restoring backup…',
       });
-      return;
-    }
 
-    this.finish(operationId, {
-      status: 'complete',
-      percent: 100,
-      message: 'Backup restored',
-    });
+      let extractedFiles = 0;
+      await replaceDirectoryAtomically(
+        serverFolder,
+        async (stagingPath) => {
+          extractedFiles = await extractBackupArchive(
+            row.filePath,
+            stagingPath,
+            inspection.totalBytes,
+            (done, total) => {
+              const percent =
+                total > 0 ? 30 + Math.min(69, Math.round((done / total) * 69)) : 30;
+              this.emit(operationId, {
+                status: 'restoring',
+                percent,
+                message: 'Restoring backup…',
+              });
+            },
+            entry?.controller.signal,
+          );
+          await preserveOwnershipMarker(serverFolder, stagingPath);
+        },
+        async (stagingPath) => {
+          const stat = await fs.promises.lstat(stagingPath);
+          if (!stat.isDirectory() || extractedFiles !== inspection.fileCount) {
+            throw new InvalidBackupArchiveError('Invalid backup archive: incomplete extraction');
+          }
+        },
+        { signal: entry?.controller.signal },
+      );
+
+      this.finish(operationId, {
+        status: 'complete',
+        percent: 100,
+        message: 'Backup restored',
+      });
+    } catch (error) {
+      if (isCanceled() || isCancellationError(error)) {
+        this.finish(operationId, {
+          status: 'canceled',
+          percent: null,
+          message: 'Restore canceled',
+          errorCode: 'cancelled',
+        });
+        return;
+      }
+      throw error;
+    }
   }
 
   /** Keep at most DEFAULT_RETENTION backups per server (oldest removed). */
   private enforceRetention(serverId: string): void {
     const rows = this.db.getServerBackups(serverId);
     if (rows.length <= DEFAULT_RETENTION) return;
-    for (const row of rows.slice(DEFAULT_RETENTION)) {
-      this.db.deleteBackup(row.id);
-      fs.rmSync(row.filePath, { force: true });
+    // Database ordering is oldest first, so remove only the excess prefix and
+    // retain the newest DEFAULT_RETENTION rows.
+    for (const row of rows.slice(0, rows.length - DEFAULT_RETENTION)) {
+      this.deleteUnlocked(row.id, row.filePath);
     }
   }
 }
@@ -444,101 +534,83 @@ function createZip(
   });
 }
 
-/** Validate that a file is a readable ZIP archive. */
-function validateZip(filePath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    yauzl.open(filePath, { lazyEntries: true }, (err, zipfile) => {
-      if (err) {
-        reject(new Error(`Invalid backup archive: ${err.message}`));
-        return;
-      }
-      zipfile.close();
-      resolve();
-    });
-  });
+interface BackupArchiveInspection {
+  fileCount: number;
+  totalBytes: number;
 }
 
-/**
- * Extract a ZIP into `destDir` with byte progress. Safe paths only — any
- * entry that would escape destDir is rejected.
- */
-function extractZip(
+async function inspectBackupArchive(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<BackupArchiveInspection> {
+  let fileCount = 0;
+  let totalBytes = 0;
+  try {
+    await walkZip(
+      filePath,
+      async (entry, stream) => {
+        fileCount += 1;
+        totalBytes += entry.uncompressedSize;
+        for await (const _chunk of stream) {
+          // Reading every entry validates compressed data before live state is touched.
+        }
+      },
+      { signal },
+    );
+  } catch (error) {
+    if (isCancellationError(error)) throw error;
+    if (error instanceof ArchivePolicyError) throw error;
+    throw new InvalidBackupArchiveError(
+      `Invalid backup archive: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return { fileCount, totalBytes };
+}
+
+async function extractBackupArchive(
   filePath: string,
   destDir: string,
+  totalBytes: number,
   onProgress: (doneBytes: number, totalBytes: number) => void,
-  isCanceled: () => boolean,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    fs.mkdirSync(destDir, { recursive: true });
-    yauzl.open(filePath, { lazyEntries: true }, (err, zipfile) => {
-      if (err) {
-        reject(new Error(`Invalid backup archive: ${err.message}`));
-        return;
+  signal?: AbortSignal,
+): Promise<number> {
+  let doneBytes = 0;
+  let fileCount = 0;
+  await walkZip(
+    filePath,
+    async (entry, stream) => {
+      const target = safeJoin(destDir, entry.fileName);
+      if (!target) {
+        throw new InvalidBackupArchiveError(
+          `Invalid backup archive: unsafe path ${entry.fileName}`,
+        );
       }
-      let total = 0;
-      let done = 0;
-      let pending = 0;
+      await writeEntryStream(stream, target, signal);
+      doneBytes += entry.uncompressedSize;
+      onProgress(doneBytes, totalBytes);
+      fileCount += 1;
+    },
+    { signal },
+  );
+  return fileCount;
+}
 
-      zipfile.readEntry();
-      zipfile.on('entry', (entry: yauzl.Entry) => {
-        if (isCanceled()) {
-          zipfile.close();
-          reject(new Error('canceled'));
-          return;
-        }
-        const resolved = path.resolve(destDir, entry.fileName);
-        if (!resolved.startsWith(path.resolve(destDir) + path.sep)) {
-          zipfile.close();
-          reject(new Error('Backup archive contains an unsafe path'));
-          return;
-        }
-        if (/\/$/.test(entry.fileName)) {
-          fs.mkdirSync(resolved, { recursive: true });
-          zipfile.readEntry();
-          return;
-        }
-        total += entry.uncompressedSize;
-        pending += 1;
-        zipfile.openReadStream(entry, (streamErr, stream) => {
-          if (streamErr) {
-            zipfile.close();
-            reject(streamErr);
-            return;
-          }
-          fs.mkdirSync(path.dirname(resolved), { recursive: true });
-          const write = fs.createWriteStream(resolved);
-          stream.on('data', (chunk: Buffer) => {
-            done += chunk.length;
-            onProgress(done, total);
-          });
-          stream.on('error', (e: Error) => {
-            zipfile.close();
-            reject(e);
-          });
-          write.on('error', (e: Error) => {
-            zipfile.close();
-            reject(e);
-          });
-          write.on('close', () => {
-            pending -= 1;
-            zipfile.readEntry();
-          });
-          stream.pipe(write);
-        });
-      });
-      zipfile.on('end', () => {
-        // All entries have been read; wait for in-flight writes to drain.
-        const check = (): void => {
-          if (pending === 0) {
-            zipfile.close();
-            resolve();
-          } else {
-            setTimeout(check, 10);
-          }
-        };
-        check();
-      });
-      zipfile.on('error', (e: Error) => reject(e));
-    });
-  });
+async function preserveOwnershipMarker(liveFolder: string, stagingFolder: string): Promise<void> {
+  const liveMarker = path.join(liveFolder, SERVER_OWNERSHIP_MARKER);
+  const stagedMarker = path.join(stagingFolder, SERVER_OWNERSHIP_MARKER);
+  if (fs.existsSync(liveMarker) && !fs.existsSync(stagedMarker)) {
+    const stat = await fs.promises.lstat(liveMarker);
+    if (stat.isFile() && !stat.isSymbolicLink()) {
+      await fs.promises.copyFile(liveMarker, stagedMarker, fs.constants.COPYFILE_EXCL);
+    }
+  }
+}
+
+function isCancellationError(error: unknown): boolean {
+  return (
+    error instanceof FilesystemTransactionCanceledError ||
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
+  );
 }

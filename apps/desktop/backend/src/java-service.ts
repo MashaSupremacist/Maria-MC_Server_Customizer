@@ -2,6 +2,11 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { buildChildProcessEnvironment } from './child-process-env';
+import { DownloadError, DownloadService } from './download-service';
+import { replaceDirectoryAtomically } from './fs-transaction';
+import { safeJoin, walkZip, writeEntryStream } from './zip-utils';
+import { fetchMetadata, fetchMetadataJson } from './metadata-fetch';
 import type {
   JavaDownloadInfo,
   JavaInstallation,
@@ -19,6 +24,9 @@ export interface JavaServiceOptions {
   fetchImpl?: typeof fetch;
   /** Root folder for private runtimes. Defaults to <dataDir>/runtimes/java. */
   runtimesDir?: string;
+  /** Maximum retained terminal/in-progress status entries. */
+  progressHistoryLimit?: number;
+  metadataTimeoutMs?: number;
 }
 
 interface AdoptiumAsset {
@@ -30,6 +38,9 @@ interface AdoptiumAsset {
       name: string;
       link: string;
       size: number;
+      checksum?: string;
+      checksum_link?: string;
+      signature_link?: string;
     };
   };
 }
@@ -74,13 +85,23 @@ export class JavaService {
   private readonly broadcast: WsBroadcast;
   private readonly fetchImpl: typeof fetch;
   private readonly runtimesDir: string;
-  private installs = new Map<string, { cancelRequested: boolean }>();
+  private readonly downloader: DownloadService;
+  private readonly progressHistoryLimit: number;
+  private readonly metadataTimeoutMs: number;
+  private installs = new Map<string, {
+    abortController: AbortController;
+    majorVersion: number;
+  }>();
+  private activeInstallByMajor = new Map<number, string>();
   private progressByInstall = new Map<string, JavaProgress>();
 
   constructor(broadcast: WsBroadcast, options: JavaServiceOptions = {}) {
     this.broadcast = broadcast;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.runtimesDir = options.runtimesDir ?? '';
+    this.downloader = new DownloadService({ fetchImpl: this.fetchImpl });
+    this.progressHistoryLimit = Math.max(1, options.progressHistoryLimit ?? 100);
+    this.metadataTimeoutMs = options.metadataTimeoutMs ?? 15_000;
   }
 
   /** Latest known progress for an install, or null if unknown/completed. */
@@ -99,6 +120,7 @@ export class JavaService {
     const candidates = [
       path.join(runtimeFolder, 'bin', 'java.exe'),
       path.join(runtimeFolder, 'bin', 'java'),
+      path.join(runtimeFolder, 'bin', 'java.cmd'),
     ];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) return candidate;
@@ -107,8 +129,10 @@ export class JavaService {
     try {
       const entries = fs.readdirSync(runtimeFolder);
       for (const entry of entries) {
-        const nested = path.join(runtimeFolder, entry, 'bin', 'java.exe');
-        if (fs.existsSync(nested)) return nested;
+        for (const executable of ['java.exe', 'java', 'java.cmd']) {
+          const nested = path.join(runtimeFolder, entry, 'bin', executable);
+          if (fs.existsSync(nested)) return nested;
+        }
       }
     } catch {
       // ignore
@@ -127,11 +151,16 @@ export class JavaService {
               // spawn passes args without shell quoting; cmd /c takes the
               // script path as a single argument.
               ['/d', '/s', '/c', javaPath, '-version'],
-              { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+              {
+                stdio: ['ignore', 'pipe', 'pipe'],
+                windowsHide: true,
+                env: buildChildProcessEnvironment(),
+              },
             )
           : spawn(javaPath, ['-version'], {
               stdio: ['ignore', 'pipe', 'pipe'],
               windowsHide: true,
+              env: buildChildProcessEnvironment(),
             });
         let output = '';
         child.stdout?.on('data', (c: Buffer) => {
@@ -181,6 +210,32 @@ export class JavaService {
     };
   }
 
+  /** Deterministically select an installed app runtime matching Minecraft. */
+  async findCompatibleRuntime(minecraftVersion: string): Promise<JavaInstallation | null> {
+    const requiredMajor = requiredJavaForMinecraft(minecraftVersion);
+    if (!fs.existsSync(this.runtimesDir)) return null;
+    let folders: string[];
+    try {
+      folders = fs
+        .readdirSync(this.runtimesDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(this.runtimesDir, entry.name))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+    } catch {
+      return null;
+    }
+
+    const preferred = this.runtimeFolder(requiredMajor);
+    folders = [preferred, ...folders.filter((folder) => path.resolve(folder) !== path.resolve(preferred))];
+    for (const folder of folders) {
+      const javaPath = this.findJavaExecutable(folder);
+      if (!javaPath) continue;
+      const detected = await this.detect(javaPath);
+      if (detected?.majorVersion === requiredMajor) return detected;
+    }
+    return null;
+  }
+
   /** Get download info for a private runtime (for the pre-download notice). */
   async getDownloadInfo(majorVersion: number): Promise<JavaDownloadInfo> {
     const pkg = await this.resolveAdoptiumPackage(majorVersion);
@@ -194,15 +249,31 @@ export class JavaService {
 
   /** Install a private Java runtime. Returns the install id. */
   install(majorVersion: number): string {
+    const active = this.activeInstallByMajor.get(majorVersion);
+    if (active && this.installs.has(active)) return active;
     const installId = crypto.randomUUID();
-    this.installs.set(installId, { cancelRequested: false });
+    this.installs.set(installId, {
+      abortController: new AbortController(),
+      majorVersion,
+    });
+    this.activeInstallByMajor.set(majorVersion, installId);
     void this.runInstall(installId, majorVersion).catch((err: unknown) => {
-      this.emit(installId, {
-        status: 'failed',
-        percent: null,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const canceled =
+        (err instanceof DownloadError && err.code === 'cancelled') ||
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        this.installs.get(installId)?.abortController.signal.aborted;
+      this.emit(installId, canceled
+        ? { status: 'canceled', percent: null, message: 'Installation canceled' }
+        : {
+            status: 'failed',
+            percent: null,
+            message: err instanceof Error ? err.message : String(err),
+          });
+    }).finally(() => {
       this.installs.delete(installId);
+      if (this.activeInstallByMajor.get(majorVersion) === installId) {
+        this.activeInstallByMajor.delete(majorVersion);
+      }
     });
     return installId;
   }
@@ -210,12 +281,30 @@ export class JavaService {
   cancel(installId: string): boolean {
     const entry = this.installs.get(installId);
     if (!entry) return false;
-    entry.cancelRequested = true;
+    entry.abortController.abort();
     return true;
   }
 
+  cancelAll(): number {
+    let canceled = 0;
+    for (const installId of [...this.installs.keys()]) {
+      if (this.cancel(installId)) canceled += 1;
+    }
+    return canceled;
+  }
+
+  activeInstallCount(): number {
+    return this.installs.size;
+  }
+
   private emit(installId: string, progress: JavaProgress): void {
+    this.progressByInstall.delete(installId);
     this.progressByInstall.set(installId, progress);
+    while (this.progressByInstall.size > this.progressHistoryLimit) {
+      const oldest = this.progressByInstall.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.progressByInstall.delete(oldest);
+    }
     this.broadcast({
       type: 'java:progress',
       javaInstallId: installId,
@@ -225,63 +314,59 @@ export class JavaService {
 
   private async runInstall(installId: string, majorVersion: number): Promise<void> {
     const entry = this.installs.get(installId);
-    const isCanceled = (): boolean => entry?.cancelRequested ?? false;
+    if (!entry) throw new Error('Java installation state was lost');
+    const signal = entry.abortController.signal;
     const folder = this.runtimeFolder(majorVersion);
+    if (signal.aborted) throw new DOMException('Installation canceled', 'AbortError');
+    const pkg = await this.resolveAdoptiumPackage(majorVersion, signal);
+    if (signal.aborted) throw new DOMException('Installation canceled', 'AbortError');
+    await fs.promises.mkdir(this.runtimesDir, { recursive: true });
+    const zipPath = path.join(this.runtimesDir, `.java-${majorVersion}-${installId}.zip`);
 
-    if (isCanceled()) {
-      this.finish(installId, 'canceled', 'Installation canceled');
-      return;
-    }
-
-    const pkg = await this.resolveAdoptiumPackage(majorVersion);
-    if (isCanceled()) {
-      this.finish(installId, 'canceled', 'Installation canceled');
-      return;
-    }
-
-    fs.mkdirSync(this.runtimesDir, { recursive: true });
-    const zipPath = path.join(this.runtimesDir, `temp-jdk-${majorVersion}.zip`);
-
-    // Download.
-    this.emit(installId, {
-      status: 'downloading',
-      percent: 0,
-      message: `Downloading ${javaLabel(majorVersion)}…`,
-    });
-    await this.downloadFile(pkg.link, zipPath, (percent) => {
+    try {
       this.emit(installId, {
         status: 'downloading',
-        percent,
+        percent: 0,
         message: `Downloading ${javaLabel(majorVersion)}…`,
       });
-    }, isCanceled);
+      await this.downloader.download({
+        url: pkg.link,
+        destination: zipPath,
+        expectedBytes: pkg.size,
+        expectedDigest: { algorithm: 'sha256', value: pkg.checksum },
+        signal,
+        onProgress: ({ percent }) => {
+          this.emit(installId, {
+            status: 'downloading',
+            percent,
+            message: `Downloading ${javaLabel(majorVersion)}…`,
+          });
+        },
+      });
 
-    if (isCanceled()) {
-      this.cleanupFile(zipPath);
-      this.finish(installId, 'canceled', 'Installation canceled');
-      return;
+      this.emit(installId, { status: 'extracting', percent: null, message: 'Extracting runtime…' });
+      await replaceDirectoryAtomically(
+        folder,
+        (staging) => this.extractZip(zipPath, staging, signal),
+        async (staging) => {
+          const javaExe = this.findJavaExecutable(staging);
+          if (!javaExe) throw new Error('Extracted runtime has no Java executable');
+          const detected = await this.detect(javaExe);
+          if (!detected) throw new Error('Extracted Java runtime could not be started');
+          if (detected.majorVersion !== majorVersion) {
+            throw new Error(
+              `Extracted runtime is Java ${detected.majorVersion}, expected Java ${majorVersion}`,
+            );
+          }
+        },
+        { signal },
+      );
+    } finally {
+      await fs.promises.rm(zipPath, { force: true }).catch(() => undefined);
     }
 
-    // Extract.
-    this.emit(installId, { status: 'extracting', percent: null, message: 'Extracting runtime…' });
-    await this.extractZip(zipPath, folder, isCanceled);
-    this.cleanupFile(zipPath);
-
-    if (isCanceled()) {
-      fs.rmSync(folder, { recursive: true, force: true });
-      this.finish(installId, 'canceled', 'Installation canceled');
-      return;
-    }
-
-    // Verify java.exe exists.
     const javaExe = this.findJavaExecutable(folder);
-    if (!javaExe) {
-      fs.rmSync(folder, { recursive: true, force: true });
-      this.finish(installId, 'failed', 'Extracted runtime has no java executable');
-      return;
-    }
-
-    this.installs.delete(installId);
+    if (!javaExe) throw new Error('Committed runtime has no Java executable');
     this.emit(installId, {
       status: 'complete',
       percent: 100,
@@ -291,99 +376,57 @@ export class JavaService {
     });
   }
 
-  private finish(
-    installId: string,
-    status: JavaProgress['status'],
-    message: string,
-  ): void {
-    this.installs.delete(installId);
-    this.emit(installId, { status, percent: null, message });
-  }
-
   private async resolveAdoptiumPackage(
     majorVersion: number,
-  ): Promise<{ link: string; size: number }> {
+    signal?: AbortSignal,
+  ): Promise<{ link: string; size: number; checksum: string; signatureLink?: string }> {
     const url = `${ADOPTIUM_API_BASE}/assets/latest/${majorVersion}/hotspot?os=windows&architecture=x64&image_type=jdk&vendor=eclipse`;
-    const res = await this.fetchImpl(url);
+    const res = await fetchMetadataJson<AdoptiumAsset[]>(url, {
+      fetchImpl: this.fetchImpl,
+      signal,
+      timeoutMs: this.metadataTimeoutMs,
+    });
     if (!res.ok) {
       throw new Error(`Failed to query Adoptium for Java ${majorVersion} (${res.status})`);
     }
-    const assets = (await res.json()) as AdoptiumAsset[];
+    const assets = res.value;
     const pkg = assets?.[0]?.binary?.package;
     if (!pkg || !pkg.link) {
       throw new Error(`No Adoptium build available for Java ${majorVersion}`);
     }
-    return { link: pkg.link, size: pkg.size };
-  }
-
-  private cleanupFile(filePath: string): void {
-    try {
-      fs.rmSync(filePath, { force: true });
-    } catch {
-      // best effort
-    }
-  }
-
-  private async downloadFile(
-    url: string,
-    dest: string,
-    onProgress: (percent: number) => void,
-    isCanceled: () => boolean,
-  ): Promise<void> {
-    const res = await this.fetchImpl(url);
-    if (!res.ok || !res.body) {
-      throw new Error(`Download failed (${res.status})`);
-    }
-    const total = Number(res.headers.get('content-length') ?? 0);
-    let received = 0;
-    const reader = res.body.getReader();
-    const file = fs.createWriteStream(dest);
-    try {
-      for (;;) {
-        if (isCanceled()) {
-          file.destroy();
-          throw new Error('Download canceled');
-        }
-        const { done, value } = await reader.read();
-        if (done) break;
-        received += value.byteLength;
-        if (total > 0) {
-          onProgress(Math.min(100, Math.round((received / total) * 100)));
-        }
-        if (!file.write(Buffer.from(value))) {
-          await new Promise<void>((resolve) => file.once('drain', resolve));
-        }
-      }
-    } finally {
-      file.end();
-    }
-  }
-
-  /** Extract a zip using PowerShell (available on all supported Windows). */
-  private async extractZip(
-    zipPath: string,
-    dest: string,
-    isCanceled: () => boolean,
-  ): Promise<void> {
-    if (isCanceled()) return;
-    fs.mkdirSync(dest, { recursive: true });
-    await new Promise<void>((resolve, reject) => {
-      const ps = spawn(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`,
-        ],
-        { stdio: 'ignore', windowsHide: true },
-      );
-      ps.on('error', reject);
-      ps.on('exit', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Extraction failed with exit code ${code}`));
+    let checksum = pkg.checksum?.trim().toLowerCase() ?? '';
+    if (!checksum && pkg.checksum_link) {
+      const checksumResponse = await fetchMetadata(pkg.checksum_link, {
+        fetchImpl: this.fetchImpl,
+        signal,
+        timeoutMs: this.metadataTimeoutMs,
       });
-    });
+      if (!checksumResponse.ok) {
+        throw new Error(`Failed to fetch Adoptium checksum (${checksumResponse.status})`);
+      }
+      checksum = checksumResponse.text.trim().split(/\s+/)[0].toLowerCase();
+    }
+    if (!/^[a-f\d]{64}$/.test(checksum)) {
+      throw new Error(`Adoptium did not provide a valid SHA-256 checksum for Java ${majorVersion}`);
+    }
+    return {
+      link: pkg.link,
+      size: pkg.size,
+      checksum,
+      signatureLink: pkg.signature_link,
+    };
+  }
+
+  /** Extract with the shared bounded, traversal-safe ZIP implementation. */
+  private async extractZip(zipPath: string, dest: string, signal: AbortSignal): Promise<void> {
+    await walkZip(zipPath, async (entry, stream) => {
+      const target = safeJoin(dest, entry.fileName);
+      if (!target) {
+        stream.destroy();
+        throw new Error(`Unsafe path in Java runtime archive: ${entry.fileName}`);
+      }
+      await writeEntryStream(stream, target, signal);
+    }, { signal });
   }
 }
 

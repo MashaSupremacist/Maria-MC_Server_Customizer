@@ -169,6 +169,31 @@ describe('WorldService', () => {
     expect(result.error).toMatch(/level.dat/);
   });
 
+  it('rejects a source that contains the destination server folder', () => {
+    fs.writeFileSync(path.join(serverFolder, 'level.dat'), makeLevelDat({ LevelName: 'Server Root' }));
+    const equal = service.import({ serverId, sourcePath: serverFolder });
+    expect(equal.error).toMatch(/cannot contain/i);
+
+    const ancestor = service.import({ serverId, sourcePath: dataDir });
+    expect(ancestor.error).toMatch(/level.dat/);
+    fs.writeFileSync(path.join(dataDir, 'level.dat'), makeLevelDat({ LevelName: 'Ancestor' }));
+    const ancestorWithWorldMarker = service.import({ serverId, sourcePath: dataDir });
+    expect(ancestorWithWorldMarker.error).toMatch(/cannot contain/i);
+  });
+
+  it('reports monotonic progress for nested world folders', async () => {
+    const source = makeWorld(dataDir, 'NestedProgress');
+    fs.mkdirSync(path.join(source, 'region', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(source, 'region', 'nested', 'large.mca'), Buffer.alloc(256 * 1024));
+    const { importId } = service.import({ serverId, sourcePath: source });
+    await waitFor(() => events.some((event) => event.importId === importId && (event.progress as { status?: string }).status === 'complete'));
+    const percentages = events
+      .filter((event) => event.importId === importId)
+      .map((event) => (event.progress as { percent?: number | null }).percent)
+      .filter((value): value is number => typeof value === 'number');
+    expect(percentages).toEqual([...percentages].sort((left, right) => left - right));
+  });
+
   it('rejects import while the server is running', () => {
     const source = makeWorld(dataDir, 'Running');
     service.setRunningServerId(() => serverId);

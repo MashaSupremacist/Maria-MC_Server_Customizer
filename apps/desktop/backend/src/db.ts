@@ -7,6 +7,7 @@ import {
   type ServerRecord,
   type UpdateServerInput,
 } from '@msc/shared-types';
+import { hasValidOwnershipMarker } from './path-policy';
 
 export interface DatabaseResult {
   /** Resolves a dir to a canonical absolute path. */
@@ -118,21 +119,27 @@ export function openDatabase(dataDir: string): DatabaseResult {
     db.exec(`ALTER TABLE servers ADD COLUMN jvm_args TEXT NOT NULL DEFAULT '[]'`);
   }
 
-  const rowToServer = (row: ServerRow): ServerRecord => ({
-    id: row.id,
-    name: row.name,
-    edition: row.edition as ServerRecord['edition'],
-    serverType: row.server_type,
-    folderPath: row.folder_path,
-    javaPath: row.java_path,
-    memoryMb: row.memory_mb,
-    port: row.port,
-    version: row.version,
-    jvmArgs: safeJsonArray(row.jvm_args),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    folderExists: fs.existsSync(row.folder_path),
-  });
+  const rowToServer = (row: ServerRow): ServerRecord => {
+    const canonicalFolderPath = canonicalizeBestEffort(row.folder_path);
+    const libraryRoot = getSettings().serverLibraryPath;
+    return {
+      id: row.id,
+      name: row.name,
+      edition: row.edition as ServerRecord['edition'],
+      serverType: row.server_type,
+      folderPath: row.folder_path,
+      javaPath: row.java_path,
+      memoryMb: row.memory_mb,
+      port: row.port,
+      version: row.version,
+      jvmArgs: safeJsonArray(row.jvm_args),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      folderExists: fs.existsSync(row.folder_path),
+      canonicalFolderPath,
+      folderOwned: hasValidOwnershipMarker(row.folder_path, libraryRoot),
+    };
+  };
 
   const safeJsonArray = (value: string): string[] => {
     try {
@@ -333,4 +340,12 @@ export function openDatabase(dataDir: string): DatabaseResult {
     deleteBackup,
     close,
   };
+}
+
+function canonicalizeBestEffort(folderPath: string): string {
+  try {
+    return path.resolve(fs.realpathSync.native(path.resolve(folderPath)));
+  } catch {
+    return path.resolve(folderPath);
+  }
 }

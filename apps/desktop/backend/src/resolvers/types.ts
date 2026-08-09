@@ -1,9 +1,15 @@
 import type { ServerFlavor } from '@msc/shared-types';
+import type { DownloadDigest } from '../download-service';
 
-/** A resolved server download: where to fetch the JAR and its SHA-1. */
+/** A resolved server artifact with any upstream integrity metadata. */
 export interface ResolvedDownload {
   url: string;
+  /** Preferred algorithm-tagged upstream digest, when published. */
+  digest?: DownloadDigest;
+  /** Legacy SHA-1 field retained until all installer callers use `digest`. */
   sha1?: string;
+  /** Exact artifact size declared by the upstream metadata. */
+  sizeBytes?: number;
   /** Local file name inside the server folder (defaults to url basename). */
   fileName: string;
 }
@@ -23,6 +29,7 @@ export interface FlavorResolver {
     includeFabricApi?: boolean;
     paperBuild?: string;
     forgeBuild?: string;
+    signal?: AbortSignal;
   }): Promise<ResolvedDownload[]>;
   /** Extra flavor-specific post-download steps (e.g. Forge --installServer). */
   installStep?(request: {
@@ -32,6 +39,7 @@ export interface FlavorResolver {
     forgeBuild?: string;
     /** A configured java.exe to use (falls back to JAVA_HOME / PATH). */
     javaPath?: string | null;
+    signal?: AbortSignal;
   }): Promise<void>;
 }
 

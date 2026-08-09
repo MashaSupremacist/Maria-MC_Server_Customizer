@@ -52,7 +52,6 @@ import {
 import { detectServerFolder, detectedServerType } from './server-detector';
 import { openDatabase, type DatabaseResult } from './db';
 import { ServerManagerService } from './server-manager';
-import { VanillaInstallerService } from './vanilla-installer';
 import { JavaService } from './java-service';
 import { ServerPropertiesService } from './server-properties';
 import { PlayerService } from './player-service';
@@ -67,6 +66,12 @@ import { BedrockPlayerService } from './bedrock-player-service';
 import { PackService } from './pack-service';
 import { ModpackService } from './modpack-service';
 import { PackInstallerService } from './pack-installer';
+import { evaluateDeletionPath } from './path-policy';
+import {
+  ServerOperationConflictError,
+  ServerOperationCoordinator,
+} from './server-operation-coordinator';
+import { OperationRegistry } from './operation-registry';
 
 const SERVER_CREATE_SCHEMA = {
   type: 'object',
@@ -259,7 +264,18 @@ export interface BuildAppOptions {
   dataDir: string;
   authToken: string;
   appVersion: string;
+  operationCoordinator?: ServerOperationCoordinator;
+  shutdownOperationDrainMs?: number;
+  shutdownProcessGraceMs?: number;
+  shutdownForceWaitMs?: number;
+  shutdownWebSocketCloseMs?: number;
 }
+
+export type BackendApp = FastifyInstance & {
+  beginShutdown(): void;
+  gracefulShutdown(): Promise<void>;
+  isShuttingDown(): boolean;
+};
 
 /**
  * Build a Fastify app for the local backend. All routes require the auth
@@ -267,16 +283,39 @@ export interface BuildAppOptions {
  * status data (never paths or tokens). WebSocket clients authenticate the
  * same way.
  */
-export async function buildApp(options: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp(options: BuildAppOptions): Promise<BackendApp> {
   const { dataDir, authToken, appVersion } = options;
   const startedAt = Date.now();
 
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false }) as unknown as BackendApp;
   const db: DatabaseResult = openDatabase(dataDir);
+  const operationCoordinator = options.operationCoordinator ?? new ServerOperationCoordinator();
+  const operationRegistry = new OperationRegistry();
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
+  let teardownPromise: Promise<void> | null = null;
+
+  app.beginShutdown = () => {
+    shuttingDown = true;
+  };
+  app.isShuttingDown = () => shuttingDown;
+  app.gracefulShutdown = () => {
+    app.beginShutdown();
+    shutdownPromise ??= app.close();
+    return shutdownPromise;
+  };
+
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof ServerOperationConflictError) {
+      return reply.code(409).send(error.conflict);
+    }
+    return reply.send(error);
+  });
 
   // Tracks connected WS clients so process events can be broadcast.
   const wsClients = new Set<WebSocket>();
   const broadcast = (event: WsServerEvent): void => {
+    operationRegistry.recordEvent(event);
     const payload = JSON.stringify(event);
     for (const socket of wsClients) {
       try {
@@ -309,37 +348,36 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       }
       return null;
     },
-    async () => {
-      // Fall back to an app-managed private runtime if one is installed.
-      const runtimesRoot = path.join(dataDir, 'runtimes', 'java');
-      if (!fs.existsSync(runtimesRoot)) return null;
-      try {
-        for (const entry of fs.readdirSync(runtimesRoot)) {
-          const javaExe = javaService.findJavaExecutable(path.join(runtimesRoot, entry));
-          if (javaExe) return javaExe;
-        }
-      } catch {
-        // ignore
-      }
-      return null;
+    async (minecraftVersion) => {
+      if (!minecraftVersion) return null;
+      const compatible = await javaService.findCompatibleRuntime(minecraftVersion);
+      return compatible?.javaPath ?? null;
     },
+    operationCoordinator,
   );
-  const installer = new ServerInstallerService(db, broadcast);
-  const extensionManager = new ExtensionManagerService(db);
+  const installer = new ServerInstallerService(db, broadcast, {
+    coordinator: operationCoordinator,
+  });
+  installer.setRunningServerId(() => manager.runningServerId());
+  const extensionManager = new ExtensionManagerService(db, operationCoordinator);
   extensionManager.setRunningServerId(() => manager.runningServerId());
   const propertiesService = new ServerPropertiesService(db);
   const playerService = new PlayerService(db, manager);
-  const worldService = new WorldService(db, broadcast);
+  const worldService = new WorldService(db, broadcast, operationCoordinator);
   worldService.setRunningServerId(() => manager.runningServerId());
   const backupsDir = path.join(dataDir, 'backups');
-  const backupService = new BackupService(db, broadcast, backupsDir);
+  const backupService = new BackupService(db, broadcast, backupsDir, operationCoordinator);
   backupService.setRunningServerId(() => manager.runningServerId());
   const playitService = new PlayitService(db, broadcast);
   const bedrockInstaller = new BedrockInstallerService(db, broadcast);
   const bedrockPropertiesService = new BedrockPropertiesService(db);
   const bedrockPlayerService = new BedrockPlayerService(db, (id) => manager.runningServerId() === id);
-  const packService = new PackService(db, (id) => manager.runningServerId() === id);
-  const modpackService = new ModpackService(db, broadcast);
+  const packService = new PackService(
+    db,
+    (id) => manager.runningServerId() === id,
+    operationCoordinator,
+  );
+  const modpackService = new ModpackService(db, broadcast, operationCoordinator);
   modpackService.setRunningServerId(() => manager.runningServerId());
   const packInstaller = new PackInstallerService(db, broadcast, { installer });
 
@@ -348,15 +386,98 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   fs.mkdirSync(runtimesDir, { recursive: true });
   const javaService = new JavaService(broadcast, { runtimesDir });
 
-  app.addHook('onClose', async () => {
-    manager.shutdown();
-    playitService.shutdown();
-    db.close();
-  });
-
   await app.register(websocket);
 
+  const waitForOperationsToDrain = async (): Promise<void> => {
+    installer.cancelAll();
+    bedrockInstaller.cancelAll();
+    javaService.cancelAll();
+    for (const operation of operationCoordinator.list()) {
+      operationCoordinator.requestCancel(operation.serverId, operation.operationId);
+      switch (operation.kind) {
+        case 'backup':
+        case 'restore':
+          backupService.cancel(operation.operationId);
+          break;
+        case 'world-import':
+          worldService.cancel(operation.operationId);
+          break;
+        case 'convert':
+          installer.cancel(operation.operationId);
+          break;
+        default:
+          break;
+      }
+    }
+    await waitUntilOrTimeout(
+      () =>
+        operationCoordinator.list().length === 0 &&
+        installer.activeInstallCount() === 0 &&
+        bedrockInstaller.activeInstallCount() === 0 &&
+        javaService.activeInstallCount() === 0,
+      options.shutdownOperationDrainMs ?? 10_000,
+    );
+  };
+
+  const closeWebSockets = async (): Promise<void> => {
+    for (const socket of wsClients) {
+      try {
+        socket.close(1001, 'Backend shutting down');
+      } catch {
+        wsClients.delete(socket);
+      }
+    }
+    await waitUntilOrTimeout(
+      () => wsClients.size === 0,
+      options.shutdownWebSocketCloseMs ?? 500,
+    );
+    for (const socket of wsClients) {
+      try {
+        socket.terminate();
+      } catch {
+        // already closed
+      }
+    }
+    wsClients.clear();
+  };
+
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      app.beginShutdown();
+      try {
+        await waitForOperationsToDrain();
+      } finally {
+        const graceMs = options.shutdownProcessGraceMs ?? 10_000;
+        const forceMs = options.shutdownForceWaitMs ?? 2_000;
+        await Promise.allSettled([
+          manager.shutdownGracefully(graceMs, forceMs),
+          playitService.shutdownGracefully(graceMs, forceMs),
+        ]);
+        try {
+          await closeWebSockets();
+        } finally {
+          db.close();
+        }
+      }
+    })();
+    return teardownPromise;
+  };
+
+  app.addHook('onClose', async () => {
+    await teardown();
+  });
+
   app.addHook('onRequest', async (request, reply) => {
+    if (
+      shuttingDown &&
+      request.url !== '/shutdown' &&
+      (request.url.startsWith('/ws') || !['GET', 'HEAD', 'OPTIONS'].includes(request.method))
+    ) {
+      return reply.code(503).send({
+        code: 'shutting-down',
+        message: 'Backend is shutting down and is not accepting new operations',
+      });
+    }
     if (request.url === '/health') return;
     if (request.url.startsWith('/ws')) {
       // Browser WebSockets cannot set headers, so accept the token via query.
@@ -379,6 +500,22 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       version: appVersion,
     };
   });
+
+  app.post('/shutdown', async (_request, reply): Promise<{ ok: true }> => {
+    // Let the acknowledgement reach Electron before Fastify closes its listener.
+    reply.raw.once('finish', () => {
+      void app.gracefulShutdown();
+    });
+    return { ok: true };
+  });
+
+  app.get<{ Params: { operationId: string } }>(
+    '/operations/:operationId',
+    async (request, reply) => {
+      const operation = operationRegistry.get(request.params.operationId);
+      return operation ?? reply.code(404).send({ error: 'Operation not found' });
+    },
+  );
 
   // Servers
   app.get('/servers', async (): Promise<ServerRecord[]> => db.listServers());
@@ -424,26 +561,47 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     '/servers/:id',
     { schema: { body: SERVER_UPDATE_SCHEMA } },
     async (request) => {
-      const record = db.updateServer(request.params.id, request.body);
-      return record ?? replyNotFound();
+      return operationCoordinator.run(request.params.id, 'settings-write', async () => {
+        const record = db.updateServer(request.params.id, request.body);
+        return record ?? replyNotFound();
+      });
     },
   );
 
   app.delete<{ Params: { id: string }; Querystring: { deleteFolder?: string } }>(
     '/servers/:id',
-    async (request): Promise<{ deleted: boolean; folderDeleted?: boolean }> => {
+    async (request): Promise<{ deleted: boolean; folderDeleted?: boolean; error?: string }> => {
       const record = db.getServer(request.params.id);
       if (!record) return { deleted: false };
 
-      // Never delete a folder for a server that is running.
-      if (request.query.deleteFolder === 'true') {
-        if (manager.isRunning(request.params.id)) {
-          return { deleted: false, folderDeleted: false };
-        }
-        await fs.promises.rm(record.folderPath, { recursive: true, force: true });
+      // A live process must retain its database record even when the caller
+      // asks to preserve the folder.
+      if (manager.isRunning(request.params.id)) {
+        return { deleted: false, folderDeleted: false, error: 'Stop the server before deleting it' };
       }
-      const deleted = db.deleteServer(request.params.id);
-      return { deleted, folderDeleted: request.query.deleteFolder === 'true' };
+
+      try {
+        return await operationCoordinator.run(request.params.id, 'delete', async () => {
+          if (request.query.deleteFolder === 'true') {
+            const decision = evaluateDeletionPath({
+              folderPath: record.folderPath,
+              libraryRoot: db.getSettings().serverLibraryPath,
+              appDataRoot: dataDir,
+            });
+            if (!decision.allowed) {
+              return { deleted: false, folderDeleted: false, error: decision.reason };
+            }
+            await fs.promises.rm(decision.canonicalPath, { recursive: true, force: true });
+          }
+          const deleted = db.deleteServer(request.params.id);
+          return { deleted, folderDeleted: request.query.deleteFolder === 'true' };
+        });
+      } catch (error) {
+        if (error instanceof ServerOperationConflictError) {
+          return { deleted: false, folderDeleted: false, error: error.message };
+        }
+        throw error;
+      }
     },
   );
 
@@ -459,7 +617,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     '/servers/:id/properties',
     { schema: { body: PROPERTIES_UPDATE_SCHEMA } },
     async (request) => {
-      return propertiesService.update(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        propertiesService.update(request.params.id, request.body),
+      );
     },
   );
 
@@ -539,7 +699,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     '/servers/:id/gamerules',
     { schema: { body: GAMERULE_UPDATE_SCHEMA } },
     async (request): Promise<CommandResult> => {
-      return playerService.updateGamerule(request.params.id, request.body.key, request.body.value);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        playerService.updateGamerule(request.params.id, request.body.key, request.body.value),
+      );
     },
   );
 
@@ -554,7 +716,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.put<{ Params: { id: string }; Body: PlayerListEntry[] }>(
     '/servers/:id/whitelist',
     async (request): Promise<CommandResult> => {
-      return playerService.updateWhitelist(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        playerService.updateWhitelist(request.params.id, request.body),
+      );
     },
   );
 
@@ -568,7 +732,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.put<{ Params: { id: string }; Body: PlayerListEntry[] }>(
     '/servers/:id/operators',
     async (request): Promise<CommandResult> => {
-      return playerService.updateOperators(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        playerService.updateOperators(request.params.id, request.body),
+      );
     },
   );
 
@@ -583,7 +749,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.put<{ Params: { id: string }; Body: PlayerListEntry[] }>(
     '/servers/:id/bans',
     async (request): Promise<CommandResult> => {
-      return playerService.updateBans(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        playerService.updateBans(request.params.id, request.body),
+      );
     },
   );
 
@@ -597,7 +765,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.put<{ Params: { id: string }; Body: PlayerListEntry[] }>(
     '/servers/:id/ip-bans',
     async (request): Promise<CommandResult> => {
-      return playerService.updateIpBans(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        playerService.updateIpBans(request.params.id, request.body),
+      );
     },
   );
 
@@ -657,15 +827,17 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     },
   );
 
-  app.post('/process/stop', async (): Promise<{ ok: boolean }> => {
-    manager.stop();
-    return { ok: true };
-  });
+  app.post<{ Body: { serverId: string } }>(
+    '/process/stop',
+    { schema: { body: START_SERVER_SCHEMA } },
+    async (request): Promise<{ ok: boolean }> => ({ ok: manager.stop(request.body.serverId) }),
+  );
 
-  app.post('/process/kill', async (): Promise<{ ok: boolean }> => {
-    manager.forceKill();
-    return { ok: true };
-  });
+  app.post<{ Body: { serverId: string } }>(
+    '/process/kill',
+    { schema: { body: START_SERVER_SCHEMA } },
+    async (request): Promise<{ ok: boolean }> => ({ ok: manager.forceKill(request.body.serverId) }),
+  );
 
   app.post<{ Body: { serverId: string } }>(
     '/process/restart',
@@ -744,7 +916,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     '/servers/:id/bedrock-properties',
     { schema: { body: PROPERTIES_UPDATE_SCHEMA } },
     async (request) => {
-      return bedrockPropertiesService.update(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        bedrockPropertiesService.update(request.params.id, request.body),
+      );
     },
   );
 
@@ -758,7 +932,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.put<{ Params: { id: string }; Body: BedrockAllowlistEntry[] }>(
     '/servers/:id/allowlist',
     async (request): Promise<CommandResult> => {
-      return bedrockPlayerService.updateAllowlist(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        bedrockPlayerService.updateAllowlist(request.params.id, request.body),
+      );
     },
   );
 
@@ -772,7 +948,9 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.put<{ Params: { id: string }; Body: BedrockPermissionEntry[] }>(
     '/servers/:id/permissions',
     async (request): Promise<CommandResult> => {
-      return bedrockPlayerService.updatePermissions(request.params.id, request.body);
+      return operationCoordinator.run(request.params.id, 'settings-write', () =>
+        bedrockPlayerService.updatePermissions(request.params.id, request.body),
+      );
     },
   );
 
@@ -786,12 +964,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   app.post<{
     Params: { id: string; kind: string };
-    Body: { files: Array<{ name: string; contentBase64: string; sizeBytes: number }> };
+    Body: { filePaths: string[] };
   }>(
     '/servers/:id/packs/:kind/upload',
     async (request): Promise<{ ok: boolean; error?: string; added: string[] }> => {
       const kind = request.params.kind === 'resource' ? 'resource' : 'behavior';
-      return packService.upload(request.params.id, kind as PackKind, request.body.files ?? []);
+      return packService.upload(request.params.id, kind as PackKind, request.body.filePaths ?? []);
     },
   );
 
@@ -807,7 +985,18 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     '/servers/convert',
     { schema: { body: CONVERT_SCHEMA } },
     async (request): Promise<{ operationId: string; error?: string }> => {
-      return installer.convert(request.body);
+      const result = await installer.convert(request.body);
+      if (result.operationId) {
+        operationRegistry.record({
+          operationId: result.operationId,
+          kind: 'server-conversion',
+          status: 'preparing',
+          percent: null,
+          message: 'Preparing server conversion…',
+          serverId: request.body.serverId,
+        });
+      }
+      return result;
     },
   );
 
@@ -830,10 +1019,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { files: Array<{ name: string; contentBase64: string; sizeBytes: number }> } }>(
+  app.post<{ Params: { id: string }; Body: { filePaths: string[] } }>(
     '/servers/:id/extensions/upload',
     async (request): Promise<{ ok: boolean; error?: string; added: string[] }> => {
-      return extensionManager.upload(request.params.id, request.body.files ?? []);
+      return extensionManager.upload(request.params.id, request.body.filePaths ?? []);
     },
   );
 
@@ -916,6 +1105,15 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     { schema: { body: JAVA_INSTALL_SCHEMA } },
     async (request): Promise<{ javaInstallId: string }> => {
       const javaInstallId = javaService.install(request.body.majorVersion);
+      if (!operationRegistry.get(javaInstallId)) {
+        operationRegistry.record({
+          operationId: javaInstallId,
+          kind: 'java-install',
+          status: 'preparing',
+          percent: 0,
+          message: `Preparing Java ${request.body.majorVersion} installation…`,
+        });
+      }
       return { javaInstallId };
     },
   );
@@ -1037,4 +1235,13 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
 function replyNotFound(): never {
   throw Object.assign(new Error('Not found'), { statusCode: 404 });
+}
+
+async function waitUntilOrTimeout(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (!predicate()) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
 }

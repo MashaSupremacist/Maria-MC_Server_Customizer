@@ -8,12 +8,14 @@ import type {
   PlayitStatus,
   WsServerEvent,
 } from '@msc/shared-types';
+import { buildChildProcessEnvironment } from './child-process-env';
 import type { DatabaseResult } from './db';
 import type { WsBroadcast } from './world-service';
 
 const LOG_LIMIT = 500;
 /** After this long in "starting" with a live process, treat Playit as online. */
 const ONLINE_GRACE_MS = 5000;
+const STOP_GRACE_MS = 3000;
 
 /**
  * Manages the Playit agent process (one at a time). Detects setup/claim links
@@ -153,10 +155,12 @@ export class PlayitService {
       ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', playitPath], {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
+          env: buildChildProcessEnvironment(),
         })
       : spawn(playitPath, [], {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
+          env: buildChildProcessEnvironment(),
         });
     this.child = child;
 
@@ -209,14 +213,15 @@ export class PlayitService {
     if (!child) return;
     this.setState('stopping');
     this.pushLog('Stopping Playit...');
-    this.killChild(child);
+    this.terminateChild(child);
     // If the process does not exit quickly, force-kill the tree.
     const timer = setTimeout(() => {
       if (this.child === child) {
         this.pushLog('Playit did not exit, force-killing', 'warn');
         this.forceKill();
       }
-    }, 10000);
+    }, STOP_GRACE_MS);
+    timer.unref();
     child.once('exit', () => clearTimeout(timer));
   }
 
@@ -234,6 +239,7 @@ export class PlayitService {
         spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
           stdio: 'ignore',
           windowsHide: true,
+          env: buildChildProcessEnvironment(),
         });
         return;
       } catch {
@@ -242,6 +248,28 @@ export class PlayitService {
     }
     try {
       child.kill('SIGKILL');
+    } catch {
+      // already dead
+    }
+  }
+
+  private terminateChild(child: ChildProcess): void {
+    const pid = child.pid;
+    if (process.platform === 'win32' && pid) {
+      try {
+        const terminator = spawn('taskkill', ['/pid', String(pid), '/T'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          env: buildChildProcessEnvironment(),
+        });
+        terminator.unref();
+        return;
+      } catch {
+        // fall through to SIGTERM
+      }
+    }
+    try {
+      child.kill('SIGTERM');
     } catch {
       // already dead
     }
@@ -256,6 +284,22 @@ export class PlayitService {
     }
     this.child = null;
     this.state = 'offline';
+  }
+
+  /** Request a clean exit first, then force-kill the complete process tree. */
+  async shutdownGracefully(gracefulTimeoutMs = 5_000, forceTimeoutMs = 2_000): Promise<void> {
+    this.clearOnlineTimer();
+    const child = this.child;
+    if (!child) return;
+
+    this.pushLog('Backend shutting down; stopping Playit', 'warn');
+    this.setState('stopping');
+    this.terminateChild(child);
+    if (await waitForChildExit(child, gracefulTimeoutMs)) return;
+
+    this.pushLog('Shutdown grace period expired; force-killing Playit descendants', 'warn');
+    this.killChild(child);
+    await waitForChildExit(child, forceTimeoutMs);
   }
 
   private clearOnlineTimer(): void {
@@ -311,6 +355,27 @@ export class PlayitService {
 
 function splitLines(text: string): string[] {
   return text.split(/\r?\n/);
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      child.off('error', onExit);
+      resolve(exited);
+    };
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+    timer.unref();
+    child.once('exit', onExit);
+    child.once('error', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
 }
 
 /** A Playit setup/claim link, e.g. https://playit.gg/claim/<code>. */

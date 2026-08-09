@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import yazl from 'yazl';
 import { openDatabase, type DatabaseResult } from '../db';
 import { ExtensionManagerService, inspectJar } from '../extension-manager';
 
 /** Build a minimal JAR with a fabric.mod.json manifest (or plugin.yml). */
-function makeJar(filePath: string, manifest: { name?: string; version?: string }, flavor: 'fabric' | 'paper'): Promise<void> {
+function makeJar(filePath: string, manifest: { name?: string; version?: string }, flavor: 'fabric' | 'paper', payloadBytes = 0): Promise<void> {
   return new Promise((resolve, reject) => {
     const zip = new yazl.ZipFile();
     const content =
@@ -22,6 +23,7 @@ function makeJar(filePath: string, manifest: { name?: string; version?: string }
           })
         : `name: ${manifest.name ?? 'testplugin'}\nversion: ${manifest.version ?? '1.0.0'}\ndescription: A test plugin\nauthors:\n  - Tester\napi-version: 1.21\n`;
     zip.addBuffer(Buffer.from(content), flavor === 'fabric' ? 'fabric.mod.json' : 'plugin.yml');
+    if (payloadBytes > 0) zip.addBuffer(crypto.randomBytes(payloadBytes), 'payload.bin');
     const output = fs.createWriteStream(filePath);
     output.on('error', reject);
     output.on('close', resolve);
@@ -128,9 +130,9 @@ describe.sequential('ExtensionManagerService', () => {
   });
 
   it('rejects non-jar uploads and validates names', async () => {
-    const bad = service.upload(serverId, [
-      { name: 'notes.txt', contentBase64: Buffer.from('hi').toString('base64'), sizeBytes: 2 },
-    ]);
+    const notes = path.join(dataDir, 'notes.txt');
+    fs.writeFileSync(notes, 'hi');
+    const bad = await service.upload(serverId, [notes]);
     expect(bad.ok).toBe(false);
     expect(bad.error).toContain('.jar');
 
@@ -141,13 +143,26 @@ describe.sequential('ExtensionManagerService', () => {
   it('uploads a jar into the mods folder', async () => {
     const source = path.join(dataDir, 'newmod.jar');
     await makeJar(source, { name: 'New Mod' }, 'fabric');
-    const contentBase64 = fs.readFileSync(source).toString('base64');
-    const res = service.upload(serverId, [
-      { name: 'newmod.jar', contentBase64, sizeBytes: fs.statSync(source).size },
-    ]);
+    const res = await service.upload(serverId, [source]);
     expect(res.ok).toBe(true);
     expect(res.added).toEqual(['newmod.jar']);
     expect(fs.existsSync(path.join(modsDir, 'newmod.jar'))).toBe(true);
+  });
+
+  it('streams multi-megabyte files and rolls back a failed multi-file import', async () => {
+    const large = path.join(dataDir, 'large.jar');
+    await makeJar(large, { name: 'Large Mod' }, 'fabric', 2 * 1024 * 1024);
+    expect(fs.statSync(large).size).toBeGreaterThan(1024 * 1024);
+    const imported = await service.upload(serverId, [large]);
+    expect(imported).toMatchObject({ ok: true, added: ['large.jar'] });
+
+    const valid = path.join(dataDir, 'valid.jar');
+    const invalid = path.join(dataDir, 'renamed.jar');
+    await makeJar(valid, { name: 'Valid Mod' }, 'fabric');
+    fs.writeFileSync(invalid, 'not a jar');
+    const failed = await service.upload(serverId, [valid, invalid]);
+    expect(failed.ok).toBe(false);
+    expect(fs.existsSync(path.join(modsDir, 'valid.jar'))).toBe(false);
   });
 
   it('reads paper plugin metadata', async () => {

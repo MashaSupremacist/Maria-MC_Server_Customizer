@@ -7,6 +7,7 @@ import type {
   CommandResult,
 } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
+import { requireServerEdition } from './server-edition';
 
 export interface OnlineStatus {
   (serverId: string): boolean;
@@ -29,8 +30,7 @@ export class BedrockPlayerService {
   }
 
   private recordPath(serverId: string): string {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'bedrock');
     return record.folderPath;
   }
 

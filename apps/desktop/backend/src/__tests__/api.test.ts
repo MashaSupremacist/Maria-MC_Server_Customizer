@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../app';
+import { ServerOperationCoordinator } from '../server-operation-coordinator';
 
 const TOKEN = 'test-token';
 const APP_VERSION = '0.0.0-test';
@@ -11,10 +12,17 @@ const APP_VERSION = '0.0.0-test';
 describe('backend API', () => {
   let app: FastifyInstance | null = null;
   let dataDir: string;
+  let operationCoordinator: ServerOperationCoordinator;
 
   beforeAll(async () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msc-test-'));
-    app = await buildApp({ dataDir, authToken: TOKEN, appVersion: APP_VERSION });
+    operationCoordinator = new ServerOperationCoordinator();
+    app = await buildApp({
+      dataDir,
+      authToken: TOKEN,
+      appVersion: APP_VERSION,
+      operationCoordinator,
+    });
     await app.listen({ port: 0, host: '127.0.0.1' });
   });
 
@@ -124,6 +132,79 @@ describe('backend API', () => {
         payload: { name: '', edition: 'java', serverType: 'vanilla', folderPath: '/x' },
       });
       expect(res.statusCode).toBe(400);
+    });
+
+    it('rejects start, delete, import, convert, and settings writes during restore', async () => {
+      const serverFolder = path.join(dataDir, 'busy-server');
+      const worldSource = path.join(dataDir, 'busy-world');
+      fs.mkdirSync(serverFolder, { recursive: true });
+      fs.mkdirSync(worldSource, { recursive: true });
+      fs.writeFileSync(path.join(worldSource, 'level.dat'), 'fixture');
+      const created = await getApp().inject({
+        method: 'POST',
+        url: '/servers',
+        headers: authHeaders,
+        payload: {
+          name: 'Busy Server',
+          edition: 'java',
+          serverType: 'vanilla',
+          folderPath: serverFolder,
+          version: '1.21.1',
+        },
+      });
+      const serverId = (created.json() as { id: string }).id;
+      const restore = operationCoordinator.acquire(serverId, 'restore', 'restore-in-progress');
+
+      try {
+        const start = await getApp().inject({
+          method: 'POST',
+          url: '/process/start',
+          headers: authHeaders,
+          payload: { serverId },
+        });
+        expect((start.json() as { error: { code: string } }).error.code).toBe('server-busy');
+
+        const deletion = await getApp().inject({
+          method: 'DELETE',
+          url: `/servers/${serverId}`,
+          headers: authHeaders,
+        });
+        expect(deletion.json()).toMatchObject({ deleted: false, error: expect.stringMatching(/busy/) });
+
+        const worldImport = await getApp().inject({
+          method: 'POST',
+          url: '/worlds/import',
+          headers: authHeaders,
+          payload: { serverId, sourcePath: worldSource },
+        });
+        expect(worldImport.json()).toMatchObject({ importId: '', error: expect.stringMatching(/busy/) });
+
+        const conversion = await getApp().inject({
+          method: 'POST',
+          url: '/servers/convert',
+          headers: authHeaders,
+          payload: { serverId, flavor: 'fabric' },
+        });
+        expect(conversion.json()).toMatchObject({ operationId: '', error: expect.stringMatching(/busy/) });
+
+        const settingsWrite = await getApp().inject({
+          method: 'PUT',
+          url: `/servers/${serverId}`,
+          headers: authHeaders,
+          payload: { name: 'Should Not Change' },
+        });
+        expect(settingsWrite.statusCode).toBe(409);
+        expect(settingsWrite.json()).toMatchObject({ code: 'server-busy' });
+      } finally {
+        operationCoordinator.release(serverId, restore.operationId);
+      }
+
+      const cleanup = await getApp().inject({
+        method: 'DELETE',
+        url: `/servers/${serverId}`,
+        headers: authHeaders,
+      });
+      expect(cleanup.json().deleted).toBe(true);
     });
 
     it('writes eula.txt and stores the version when acceptEula is true', async () => {
@@ -303,6 +384,63 @@ describe('backend API', () => {
     });
   });
 
+  describe('edition and deletion safety', () => {
+    it('rejects Java routes for Bedrock and Bedrock routes for Java', async () => {
+      const javaFolder = path.join(dataDir, 'edition-java');
+      const bedrockFolder = path.join(dataDir, 'edition-bedrock');
+      fs.mkdirSync(javaFolder, { recursive: true });
+      fs.mkdirSync(bedrockFolder, { recursive: true });
+      fs.writeFileSync(path.join(javaFolder, 'server.properties'), 'motd=java\n');
+      fs.writeFileSync(path.join(bedrockFolder, 'server.properties'), 'server-name=bedrock\n');
+
+      const create = async (edition: 'java' | 'bedrock', folderPath: string) =>
+        (await getApp().inject({
+          method: 'POST',
+          url: '/servers',
+          headers: authHeaders,
+          payload: { name: edition, edition, serverType: edition === 'java' ? 'vanilla' : 'bedrock', folderPath },
+        })).json() as { id: string };
+      const javaServer = await create('java', javaFolder);
+      const bedrockServer = await create('bedrock', bedrockFolder);
+
+      const javaOnBedrock = await getApp().inject({ method: 'GET', url: `/servers/${bedrockServer.id}/properties`, headers: authHeaders });
+      const bedrockOnJava = await getApp().inject({ method: 'GET', url: `/servers/${javaServer.id}/bedrock-properties`, headers: authHeaders });
+      const extensionsOnBedrock = await getApp().inject({ method: 'GET', url: `/servers/${bedrockServer.id}/extensions`, headers: authHeaders });
+      const packsOnJava = await getApp().inject({ method: 'GET', url: `/servers/${javaServer.id}/packs?kind=behavior`, headers: authHeaders });
+
+      expect(javaOnBedrock.statusCode).toBe(400);
+      expect(bedrockOnJava.statusCode).toBe(400);
+      expect(extensionsOnBedrock.statusCode).toBe(400);
+      expect(packsOnJava.statusCode).toBe(400);
+
+      await getApp().inject({ method: 'DELETE', url: `/servers/${javaServer.id}`, headers: authHeaders });
+      await getApp().inject({ method: 'DELETE', url: `/servers/${bedrockServer.id}`, headers: authHeaders });
+    });
+
+    it('preserves an unowned external folder when recursive deletion is requested', async () => {
+      const externalFolder = path.join(dataDir, 'external-server-folder');
+      fs.mkdirSync(externalFolder, { recursive: true });
+      fs.writeFileSync(path.join(externalFolder, 'important.txt'), 'keep');
+      const created = await getApp().inject({
+        method: 'POST',
+        url: '/servers',
+        headers: authHeaders,
+        payload: { name: 'External', edition: 'java', serverType: 'vanilla', folderPath: externalFolder },
+      });
+      const record = created.json() as { id: string; folderOwned: boolean };
+      expect(record.folderOwned).toBe(false);
+
+      const deleted = await getApp().inject({
+        method: 'DELETE',
+        url: `/servers/${record.id}?deleteFolder=true`,
+        headers: authHeaders,
+      });
+      expect(deleted.json()).toMatchObject({ deleted: false, folderDeleted: false });
+      expect(fs.readFileSync(path.join(externalFolder, 'important.txt'), 'utf8')).toBe('keep');
+      await getApp().inject({ method: 'DELETE', url: `/servers/${record.id}`, headers: authHeaders });
+    });
+  });
+
   describe('backups', () => {
     it('creates, lists, restores, and deletes a backup over the API', async () => {
       const serverFolder = path.join(dataDir, 'backup-server');
@@ -367,6 +505,7 @@ describe('backend API', () => {
         // Restore is async; poll until the file matches the backup.
         return fs.readFileSync(path.join(serverFolder, 'server.properties'), 'utf8') === 'motd=api\n';
       });
+      await waitFor(() => operationCoordinator.inspect(record.id) === null);
 
       // Delete the backup.
       const delRes = await getApp().inject({

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import {
   findServerExecutable,
   findServerJar,
@@ -13,6 +16,7 @@ import {
   parsePlayerList,
   parsePlayerName,
   ProcessManager,
+  type ProcessSpawner,
   type ServerConfig,
 } from '../process-manager';
 
@@ -70,6 +74,28 @@ function writeFakeServer(): void {
   // server is allowed to start. The missing-eula test creates the folder
   // without it on purpose.
   fs.writeFileSync(path.join(tempDir, 'eula.txt'), 'eula=true\n');
+}
+
+interface FakeChildProcess {
+  child: ChildProcess;
+  stdout: PassThrough;
+  stderr: PassThrough;
+}
+
+/** A controllable child process whose stream/event boundaries are test-owned. */
+function createFakeChildProcess(): FakeChildProcess {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const stdin = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    stdin,
+    pid: undefined,
+    killed: false,
+    kill: () => true,
+  }) as unknown as ChildProcess;
+  return { child, stdout, stderr };
 }
 
 describe('findServerJar', () => {
@@ -157,6 +183,82 @@ describe('ProcessManager', () => {
     manager.start(makeServerConfig());
     const err = manager.start(makeServerConfig());
     expect(err?.code).toBe('already-running');
+    manager.stop();
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
+
+  it('reassembles Java readiness, player, and log lines across arbitrary chunks', () => {
+    writeFakeServer();
+    const fake = createFakeChildProcess();
+    const spawner: ProcessSpawner = () => fake.child;
+    manager = new ProcessManager(
+      {
+        onState: (_serverId, state, exitCode) => states.push({ state, exitCode }),
+        onLog: (_serverId, log) => logs.push(log.text),
+        onStats: () => undefined,
+      },
+      spawner,
+    );
+
+    expect(manager.start(makeServerConfig())).toBeNull();
+    fake.stdout.write('Done (1.');
+    fake.stdout.write('234s)! For help, type "help"\r');
+    fake.stdout.write('\n[21:12:00] [Server thread/INFO]: Ste');
+    fake.stdout.write('ve joined the game\nfinal partial log');
+
+    expect(states.some((entry) => entry.state === 'online')).toBe(true);
+    expect(manager.getStatus('test-server').stats.onlinePlayers).toEqual(['Steve']);
+    expect(logs).toContain('Done (1.234s)! For help, type "help"');
+    expect(logs).toContain('[21:12:00] [Server thread/INFO]: Steve joined the game');
+    expect(logs).not.toContain('Done (1.');
+    expect(logs).not.toContain('final partial log');
+
+    fake.child.emit('close', 0, null);
+    expect(logs.filter((line) => line === 'final partial log')).toHaveLength(1);
+    // A late duplicate close must not flush or report the process twice.
+    fake.child.emit('close', 0, null);
+    expect(logs.filter((line) => line === 'final partial log')).toHaveLength(1);
+    expect(logs.filter((line) => line === 'Process exited (code 0)')).toHaveLength(1);
+    expect(manager.runningServerId).toBeNull();
+  });
+
+  it('cleans up a spawn error without close and allows a subsequent start', async () => {
+    writeFakeServer();
+    const failed = createFakeChildProcess();
+    let attempt = 0;
+    const spawner: ProcessSpawner = (command, args, options) => {
+      attempt += 1;
+      if (attempt === 1) return failed.child;
+      return spawnChild(command, [...args], options);
+    };
+    manager = new ProcessManager(
+      {
+        onState: (_serverId, state, exitCode) => states.push({ state, exitCode }),
+        onLog: (_serverId, log) => logs.push(log.text),
+        onStats: () => undefined,
+      },
+      spawner,
+    );
+
+    expect(manager.start(makeServerConfig())).toBeNull();
+    failed.stdout.write('unterminated before spawn error');
+    failed.child.emit('error', new Error('synthetic spawn failure'));
+
+    expect(manager.runningServerId).toBeNull();
+    expect(logs.filter((line) => line === 'unterminated before spawn error')).toHaveLength(1);
+    expect(logs.filter((line) => line === 'Process error: synthetic spawn failure')).toHaveLength(1);
+    expect(states.filter((entry) => entry.state === 'crashed')).toHaveLength(1);
+
+    expect(manager.start(makeServerConfig())).toBeNull();
+    await waitFor(() => logs.some((line) => line.includes('Done (1.234s)')));
+    expect(manager.runningServerId).toBe('test-server');
+
+    // Even if the failed child eventually emits close, it cannot clear the
+    // replacement process or duplicate its terminal state/log entries.
+    failed.child.emit('close', 1, null);
+    expect(manager.runningServerId).toBe('test-server');
+    expect(logs.filter((line) => line === 'Process error: synthetic spawn failure')).toHaveLength(1);
+
     manager.stop();
     await waitFor(() => manager.runningServerId === null, 5000);
   });
@@ -280,6 +382,47 @@ describe('ProcessManager', () => {
     await waitFor(() => manager.runningServerId === null, 5000);
   });
 
+  it('does not expose backend secrets to a server process', async () => {
+    const marker = path.join(tempDir, 'child-env.json');
+    fs.writeFileSync(
+      path.join(tempDir, 'record-env.js'),
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ token: process.env.MSC_AUTH_TOKEN ?? null, dataDir: process.env.MSC_DATA_DIR ?? null, path: process.env.PATH ?? null }));\n`,
+    );
+    fs.writeFileSync(path.join(tempDir, 'fake-server.js'), FAKE_SERVER_SCRIPT);
+    fs.writeFileSync(
+      path.join(tempDir, 'start.bat'),
+      '@echo off\r\nnode "%~dp0record-env.js"\r\nnode "%~dp0fake-server.js" %*\r\n',
+    );
+
+    const previousToken = process.env.MSC_AUTH_TOKEN;
+    const previousDataDir = process.env.MSC_DATA_DIR;
+    process.env.MSC_AUTH_TOKEN = 'must-not-leak';
+    process.env.MSC_DATA_DIR = 'C:\\private-backend-data';
+    try {
+      const err = manager.start(
+        makeServerConfig({ javaPath: '', jvmArgs: [], folderPath: tempDir }),
+      );
+      expect(err).toBeNull();
+      await waitFor(() => fs.existsSync(marker), 10000);
+      const childEnv = JSON.parse(fs.readFileSync(marker, 'utf8')) as {
+        token: string | null;
+        dataDir: string | null;
+        path: string | null;
+      };
+      expect(childEnv.token).toBeNull();
+      expect(childEnv.dataDir).toBeNull();
+      expect(childEnv.path).toBeTruthy();
+    } finally {
+      if (previousToken === undefined) delete process.env.MSC_AUTH_TOKEN;
+      else process.env.MSC_AUTH_TOKEN = previousToken;
+      if (previousDataDir === undefined) delete process.env.MSC_DATA_DIR;
+      else process.env.MSC_DATA_DIR = previousDataDir;
+    }
+
+    manager.stop();
+    await waitFor(() => manager.runningServerId === null, 5000);
+  });
+
   it('sends commands via stdin', async () => {
     writeFakeServer();
     manager.start(makeServerConfig());
@@ -299,6 +442,18 @@ describe('ProcessManager', () => {
     await waitFor(() => manager.runningServerId === null, 5000);
     const last = states[states.length - 1];
     expect(last.state).toBe('offline');
+  });
+
+  it('graceful shutdown sends the server stop command and waits for exit', async () => {
+    writeFakeServer();
+    manager.start(makeServerConfig());
+    await waitFor(() => logs.some((line) => line.includes('Done (1.234s)')));
+
+    await manager.shutdownGracefully(5000, 100);
+
+    expect(manager.runningServerId).toBeNull();
+    expect(logs.some((line) => line.includes('Sending "stop" command'))).toBe(true);
+    expect(states[states.length - 1].state).toBe('offline');
   });
 
   it('marks an unexpected exit as crashed', async () => {
@@ -542,6 +697,26 @@ describe('findServerExecutable', () => {
     expect(findServerExecutable(tempDir, 'java')).toBe(path.join(tempDir, 'start.bat'));
   });
 
+  it('selects a modern Forge run.bat when the install has no root jar', () => {
+    const argsDir = path.join(
+      tempDir,
+      'libraries',
+      'net',
+      'minecraftforge',
+      'forge',
+      '1.21.1-52.0.57',
+    );
+    fs.mkdirSync(argsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'run.bat'),
+      '@echo off\r\njava @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.21.1-52.0.57/win_args.txt %*\r\n',
+    );
+    fs.writeFileSync(path.join(tempDir, 'user_jvm_args.txt'), '# generated\n');
+    fs.writeFileSync(path.join(argsDir, 'win_args.txt'), '-Dforge=true\n');
+
+    expect(findServerExecutable(tempDir, 'java', 'forge')).toBe(path.join(tempDir, 'run.bat'));
+  });
+
   it('prefers a jar over a batch launcher when both exist', () => {
     fs.writeFileSync(path.join(tempDir, 'server.jar'), 'x');
     fs.writeFileSync(path.join(tempDir, 'start.bat'), '@echo off');
@@ -618,6 +793,36 @@ describe('Bedrock ProcessManager', () => {
     expect(commandLog).toContain('bedrock_server.cmd');
     expect(commandLog).not.toContain('-jar');
     expect(manager.getStatus('bedrock-server').stats.playerCount).toBe(0);
+  });
+
+  it('reassembles Bedrock readiness, player, and stderr lines across chunks', () => {
+    writeFakeBedrock();
+    const fake = createFakeChildProcess();
+    manager = new ProcessManager(
+      {
+        onState: (_serverId, state, exitCode) => states.push({ state, exitCode }),
+        onLog: (_serverId, log) => logs.push(log.text),
+        onStats: () => undefined,
+      },
+      () => fake.child,
+    );
+
+    expect(manager.start(bedrockConfig())).toBeNull();
+    fake.stdout.write('Server star');
+    fake.stdout.write('ted.\r\nPlayer connec');
+    fake.stdout.write('ted: Alex, xuid: 456\n');
+    fake.stderr.write('final stderr warning');
+
+    expect(states.some((entry) => entry.state === 'online')).toBe(true);
+    expect(manager.getStatus('bedrock-server').stats.onlinePlayers).toEqual(['Alex']);
+    expect(logs).toContain('Server started.');
+    expect(logs).toContain('Player connected: Alex, xuid: 456');
+    expect(logs).not.toContain('Server star');
+    expect(logs).not.toContain('final stderr warning');
+
+    fake.child.emit('close', 1, null);
+    expect(logs.filter((line) => line === 'final stderr warning')).toHaveLength(1);
+    expect(manager.runningServerId).toBeNull();
   });
 
   it('fails with missing-executable when bedrock_server.exe is absent', () => {

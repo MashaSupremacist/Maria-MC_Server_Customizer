@@ -1,4 +1,5 @@
 import { buildApp } from './app';
+import { createSignalShutdownHandler } from './backend-shutdown';
 
 const dataDir = process.env.MSC_DATA_DIR ?? '';
 const authToken = process.env.MSC_AUTH_TOKEN ?? '';
@@ -30,10 +31,7 @@ async function main(): Promise<void> {
       process.exit(1);
     });
 
-  function shutdown(signal: string): void {
-    console.log(`Received ${signal}, shutting down`);
-    void app.close().then(() => process.exit(0));
-  }
+  const shutdown = createSignalShutdownHandler(app);
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));

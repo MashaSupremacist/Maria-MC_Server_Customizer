@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ServerFlavor } from '@msc/shared-types';
+import { isBatchLauncherName } from './launch-target';
 
 /** A Minecraft server detected in an existing folder. */
 export interface DetectedServer {
@@ -14,9 +15,6 @@ export interface DetectedServer {
 }
 
 const BEDROCK_EXECUTABLES = ['bedrock_server.exe', 'bedrock_server.cmd', 'bedrock_server.bat'];
-
-/** Common batch launcher names for packs that ship a start script instead of a bare jar. */
-const BATCH_LAUNCHERS = ['start.bat', 'run.bat', 'start-server.bat', 'startserver.bat', 'launch.bat', 'server.bat'];
 
 /**
  * Sniff a Minecraft version out of a server jar file name. Understands the
@@ -92,7 +90,7 @@ export function detectServerFolder(folderPath: string): DetectedServer | null {
   // ships only the installer plus a launcher is still a batch-launcher pack.
   const runnableJars = jars.filter((f) => !f.includes('-installer.'));
   if (runnableJars.length === 0) {
-    const launcher = entries.find((f) => BATCH_LAUNCHERS.includes(f.toLowerCase()));
+    const launcher = entries.find(isBatchLauncherName);
     if (launcher) {
       return {
         edition: 'java',
@@ -129,7 +127,7 @@ export function detectServerFolder(folderPath: string): DetectedServer | null {
     (f) => f.startsWith('forge-') && f.includes('-installer.'),
   );
   if (hasForgeInstaller) {
-    const launcher = entries.find((f) => BATCH_LAUNCHERS.includes(f.toLowerCase()));
+    const launcher = entries.find(isBatchLauncherName);
     if (launcher) {
       return {
         edition: 'java',

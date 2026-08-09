@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
+import path from 'node:path';
 
 /** A parsed server.properties file, preserving comments and line order. */
 export interface PropertiesFile {
@@ -107,4 +109,18 @@ function unescapeProperties(value: string): string {
 export function readPropertiesFile(filePath: string): PropertiesFile | null {
   if (!fs.existsSync(filePath)) return null;
   return parseProperties(fs.readFileSync(filePath, 'utf8'));
+}
+
+/** Write a configuration file through a unique sibling and atomic rename. */
+export function atomicWriteTextFile(filePath: string, text: string): void {
+  const temporary = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`,
+  );
+  try {
+    fs.writeFileSync(temporary, text, { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(temporary, filePath);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }

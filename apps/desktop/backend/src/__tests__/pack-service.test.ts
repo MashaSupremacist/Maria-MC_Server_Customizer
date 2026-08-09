@@ -94,9 +94,9 @@ describe.sequential('PackService', () => {
 
   it('uploads and extracts a pack zip', async () => {
     const zip = await makeZipBuffer();
-    const result = await service().upload(serverId, 'resource', [
-      { name: 'mypack.zip', contentBase64: zip.toString('base64'), sizeBytes: zip.length },
-    ]);
+    const source = path.join(dataDir, 'mypack.zip');
+    fs.writeFileSync(source, zip);
+    const result = await service().upload(serverId, 'resource', [source]);
     expect(result.ok).toBe(true);
     expect(result.added).toEqual(['mypack']);
     const folder = path.join(serverFolder, 'resource_packs', 'mypack');
@@ -105,9 +105,9 @@ describe.sequential('PackService', () => {
   });
 
   it('rejects non-pack files', async () => {
-    const result = await service().upload(serverId, 'behavior', [
-      { name: 'evil.exe', contentBase64: 'aGVsbG8=', sizeBytes: 5 },
-    ]);
+    const source = path.join(dataDir, 'evil.exe');
+    fs.writeFileSync(source, 'hello');
+    const result = await service().upload(serverId, 'behavior', [source]);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/Only \.mcpack/);
   });
@@ -116,18 +116,18 @@ describe.sequential('PackService', () => {
     // PackService.extract rejects unsafe entry names via safeEntryTarget;
     // that helper is unit-tested above. Here we confirm an upload of an
     // invalid zip fails cleanly.
-    const result = await service().upload(serverId, 'behavior', [
-      { name: 'evil.zip', contentBase64: Buffer.from('not-a-zip').toString('base64'), sizeBytes: 9 },
-    ]);
+    const source = path.join(dataDir, 'evil.zip');
+    fs.writeFileSync(source, 'not-a-zip');
+    const result = await service().upload(serverId, 'behavior', [source]);
     expect(result.ok).toBe(false);
   });
 
   it('refuses uploads while the server is running', async () => {
     online = true;
     const zip = await makeZipBuffer();
-    const result = await service().upload(serverId, 'behavior', [
-      { name: 'mypack.zip', contentBase64: zip.toString('base64'), sizeBytes: zip.length },
-    ]);
+    const source = path.join(dataDir, 'mypack.zip');
+    fs.writeFileSync(source, zip);
+    const result = await service().upload(serverId, 'behavior', [source]);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/Stop the server/);
   });

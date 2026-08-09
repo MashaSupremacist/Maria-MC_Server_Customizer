@@ -6,12 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { openDatabase, type DatabaseResult } from '../db';
 import { ServerInstallerService } from '../server-installer';
+import { ServerOperationCoordinator } from '../server-operation-coordinator';
 
 /** Fake Mojang + Fabric + Paper endpoints over one local server. */
 function startFakeServer(): Promise<{ baseUrl: string; server: Server; jarSha1: string }> {
   return new Promise((resolve) => {
     const jarContent = Buffer.from('fake-minecraft-server-jar');
     const sha1 = crypto.createHash('sha1').update(jarContent).digest('hex');
+    const sha256 = crypto.createHash('sha256').update(jarContent).digest('hex');
     const server = createServer((req, res) => {
       const url = req.url ?? '';
       if (url === '/manifest') {
@@ -54,7 +56,7 @@ function startFakeServer(): Promise<{ baseUrl: string; server: Server; jarSha1: 
               'server:default': {
                 name: 'paper-1.21.1-123.jar',
                 size: jarContent.length,
-                checksums: { sha256: 'abc' },
+                checksums: { sha256 },
                 url: '/paper/project/versions/1.21.1/builds/123/downloads/paper-1.21.1-123.jar',
               },
             },
@@ -67,7 +69,11 @@ function startFakeServer(): Promise<{ baseUrl: string; server: Server; jarSha1: 
         res.end(
           `<?xml version="1.0"?><metadata><groupId>net.minecraftforge</groupId><artifactId>forge</artifactId><versioning><latest>1.21.1-52.0.57</latest><versions><version>1.21.1-52.0.57</version></versions></versioning></metadata>`,
         );
-      } else if (url.startsWith('/forge/net/minecraftforge/forge/1.21.1-52.0.57/forge-1.21.1-52.0.57-installer.jar')) {
+      } else if (url.endsWith('forge-1.21.1-52.0.57-installer.jar.sha256')) {
+        res.end(sha256);
+      } else if (url.endsWith('forge-1.21.1-52.0.57-installer.jar.sha1')) {
+        res.end(sha1);
+      } else if (url.endsWith('forge-1.21.1-52.0.57-installer.jar')) {
         res.setHeader('content-type', 'application/java-archive');
         res.end(jarContent);
       } else {
@@ -103,6 +109,7 @@ describe.sequential('ServerInstallerService', () => {
   let library: string;
   let fake: { baseUrl: string; server: Server; jarSha1: string };
   let service: ServerInstallerService;
+  let coordinator: ServerOperationCoordinator;
   const events: Array<{ installId: string; progress: { status?: string; serverId?: string } }> = [];
 
   afterEach(() => {
@@ -119,7 +126,12 @@ describe.sequential('ServerInstallerService', () => {
     db = openDatabase(dataDir);
     db.setSetting('serverLibraryPath', library);
     fake = await startFakeServer();
-    service = new ServerInstallerService(db, (event) => {
+    coordinator = new ServerOperationCoordinator();
+    service = buildService(db);
+  }
+
+  function buildService(database: DatabaseResult): ServerInstallerService {
+    return new ServerInstallerService(database, (event) => {
       if (event.type === 'install:progress') {
         events.push({ installId: event.installId, progress: event.progress });
       }
@@ -129,6 +141,7 @@ describe.sequential('ServerInstallerService', () => {
       fabricMetaUrl: `${fake.baseUrl}/fabric`,
       paperApiUrl: `${fake.baseUrl}/paper/project`,
       forgeMavenUrl: `${fake.baseUrl}/forge/net/minecraftforge/forge`,
+      coordinator,
     });
   }
 
@@ -169,6 +182,71 @@ describe.sequential('ServerInstallerService', () => {
     expect(record?.folderPath).toContain('my-vanilla');
     expect(fs.existsSync(path.join(record!.folderPath, 'server.jar'))).toBe(true);
     expect(fs.readFileSync(path.join(record!.folderPath, 'eula.txt'), 'utf8')).toContain('eula=true');
+    expect(record?.folderOwned).toBe(true);
+    expect(fs.readdirSync(library).some((name) => name.includes('.staging-'))).toBe(false);
+  });
+
+  it('removes the committed folder when database registration fails', async () => {
+    await setup();
+    let folderSeenByDatabase = '';
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'createServer') {
+          return (input: { folderPath: string }): never => {
+            folderSeenByDatabase = input.folderPath;
+            expect(fs.existsSync(path.join(input.folderPath, 'server.jar'))).toBe(true);
+            expect(path.basename(input.folderPath)).toBe('db-failure');
+            throw new Error('database insert failed');
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    service = buildService(failingDb);
+
+    await service.install({
+      flavor: 'vanilla',
+      name: 'DB Failure',
+      version: '1.21.1',
+      acceptEula: true,
+    });
+    await waitForProgress('failed');
+
+    expect(folderSeenByDatabase).toBe(path.join(library, 'db-failure'));
+    expect(db.listServers()).toHaveLength(0);
+    expect(fs.existsSync(folderSeenByDatabase)).toBe(false);
+    expect(fs.readdirSync(library)).toEqual([]);
+  });
+
+  it('cleans staging when a flavor installer process cannot run', async () => {
+    await setup();
+    await service.install({
+      flavor: 'forge',
+      name: 'Broken Forge',
+      version: '1.21.1',
+      acceptEula: true,
+      javaPath: null,
+    });
+    await waitForProgress('failed');
+
+    expect(db.listServers()).toHaveLength(0);
+    expect(fs.readdirSync(library)).toEqual([]);
+  });
+
+  it('cleans staging and never registers when canceled', async () => {
+    await setup();
+    const installId = await service.install({
+      flavor: 'vanilla',
+      name: 'Canceled Java',
+      version: '1.21.1',
+      acceptEula: true,
+    });
+    expect(service.cancel(installId)).toBe(true);
+    await waitForProgress('canceled');
+
+    expect(db.listServers()).toHaveLength(0);
+    expect(fs.readdirSync(library)).toEqual([]);
   });
 
   it('rejects install without EULA', async () => {
@@ -238,6 +316,26 @@ describe.sequential('ServerInstallerService', () => {
     await setup();
     const res = await service.convert({ serverId: 'missing', flavor: 'paper' });
     expect(res.error).toContain('not found');
+  });
+
+  it('rejects conversion while another server operation is active', async () => {
+    await setup();
+    const serverFolder = path.join(library, 'busy-convert');
+    fs.mkdirSync(serverFolder, { recursive: true });
+    const record = db.createServer({
+      name: 'Busy Convert',
+      edition: 'java',
+      serverType: 'vanilla',
+      folderPath: serverFolder,
+      version: '1.21.1',
+    });
+    const restore = coordinator.acquire(record.id, 'restore', 'restore-active');
+    try {
+      const result = await service.convert({ serverId: record.id, flavor: 'fabric' });
+      expect(result).toMatchObject({ operationId: '', error: expect.stringMatching(/busy/) });
+    } finally {
+      coordinator.release(record.id, restore.operationId);
+    }
   });
 
   it('converts a server to forge, using the record javaPath for the installer', { timeout: 30000 }, async () => {

@@ -27,6 +27,7 @@ export const IpcChannels = {
   windowToggleMaximize: 'window:toggle-maximize',
   windowClose: 'window:close',
   backendInfo: 'backend:info',
+  operationStatus: 'operations:status',
   selectServerLibrary: 'dialog:select-server-library',
   getSettings: 'settings:get',
   setSetting: 'settings:set',
@@ -76,6 +77,7 @@ export const IpcChannels = {
   createBackup: 'backups:create',
   deleteBackup: 'backups:delete',
   restoreBackup: 'backups:restore',
+  cancelBackup: 'backups:cancel',
   getPlayitSettings: 'playit:settings:get',
   updatePlayitSettings: 'playit:settings:update',
   detectPlayit: 'playit:detect',
@@ -121,7 +123,11 @@ export interface AppInfo {
 }
 
 /** Result of checking GitHub Releases for a newer app version. */
+export type UpdateCheckStatus = 'update-available' | 'up-to-date' | 'failed';
+
 export interface UpdateInfo {
+  /** Whether the check succeeded and, if so, whether an update exists. */
+  checkStatus: UpdateCheckStatus;
   /** True when a newer version exists on GitHub. */
   updateAvailable: boolean;
   /** Latest published version, if known. */
@@ -132,6 +138,8 @@ export interface UpdateInfo {
   releaseUrl: string | null;
   /** Human-readable release notes snippet. */
   notes: string | null;
+  /** Non-sensitive diagnostic when the update check itself failed. */
+  error?: string;
 }
 
 /** Connection details for the local Fastify backend. */
@@ -164,6 +172,10 @@ export interface ServerRecord {
   updatedAt: string;
   /** True when the server folder still exists on disk. */
   folderExists: boolean;
+  /** Canonical folder path used in destructive confirmations. */
+  canonicalFolderPath: string;
+  /** True only for a library child carrying a valid app ownership marker. */
+  folderOwned: boolean;
 }
 
 export interface CreateServerInput {
@@ -351,7 +363,7 @@ export interface ModpackImportRequest {
   serverId: string;
   /** Absolute path to the pack file (chosen via the native file dialog). */
   filePath: string;
-  /** Bypass the loader/MC version match check. */
+  /** Bypass loader/version checks and explicitly overwrite conflicting pack files. */
   force?: boolean;
 }
 
@@ -365,6 +377,10 @@ export interface ModpackImportResult {
   filesCopied: number;
   /** Number of files skipped (server state / excluded paths). */
   skipped: number;
+  /** Number of files fetched from a standard pack manifest. */
+  downloaded: number;
+  /** Number of declared files rejected as unsafe, unverifiable, or unsupported. */
+  rejected: number;
 }
 
 /** What a server-pack zip contains, sniffed by the backend. */
@@ -499,6 +515,7 @@ export interface StartServerError {
     | 'missing-eula'
     | 'already-running'
     | 'another-server-running'
+    | 'server-busy'
     | 'folder-not-found'
     | 'incompatible-java';
   message: string;
@@ -716,6 +733,30 @@ export interface BackupProgress {
   /** Error code for the failed state. */
   errorCode?: 'not-found' | 'server-running' | 'io' | 'cancelled' | 'invalid-archive';
   backup?: BackupEntry;
+}
+
+/** Long-running work that remains queryable across renderer/socket reconnects. */
+export type OperationKind =
+  | 'server-install'
+  | 'server-conversion'
+  | 'java-install'
+  | 'world-import'
+  | 'backup';
+
+export type OperationState = 'active' | 'succeeded' | 'failed' | 'canceled';
+
+export interface OperationStatus {
+  operationId: string;
+  kind: OperationKind;
+  state: OperationState;
+  status: string;
+  percent: number | null;
+  message: string;
+  serverId?: string;
+  /** Present for a successfully installed private Java runtime. */
+  javaPath?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Playit tunnel process lifecycle states. */

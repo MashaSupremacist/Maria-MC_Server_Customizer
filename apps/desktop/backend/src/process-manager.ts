@@ -1,7 +1,14 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import {
+  spawn,
+  type ChildProcess,
+  type SpawnOptions,
+} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import pidusage from 'pidusage';
+import { StringDecoder } from 'node:string_decoder';
+import { buildChildProcessEnvironment } from './child-process-env';
+import { findBatchLauncher } from './launch-target';
 import type {
   LogLine,
   ServerFlavor,
@@ -32,11 +39,15 @@ export interface ProcessEvents {
   onStats: (serverId: string, stats: ServerStats) => void;
 }
 
+/** Injectable process launcher used by focused lifecycle tests. */
+export type ProcessSpawner = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => ChildProcess;
+
 const LOG_LIMIT = 500;
 const STATS_INTERVAL_MS = 2000;
-
-/** Common batch launcher names for packs that ship a start script instead of a bare jar. */
-const BATCH_LAUNCHERS = ['start.bat', 'run.bat', 'start-server.bat', 'startserver.bat', 'launch.bat', 'server.bat'];
 
 /** Find the server jar in a server folder, flavor-aware. */
 export function findServerJar(
@@ -79,17 +90,7 @@ export function findServerJar(
 }
 
 /** Find a batch launcher (start.bat / run.bat / …) in a server folder, if any. */
-export function findBatchLauncher(folderPath: string): string | null {
-  if (!fs.existsSync(folderPath)) return null;
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(folderPath);
-  } catch {
-    return null;
-  }
-  const launcher = entries.find((f) => BATCH_LAUNCHERS.includes(f.toLowerCase()));
-  return launcher ? path.join(folderPath, launcher) : null;
-}
+export { findBatchLauncher } from './launch-target';
 
 /** Find the executable/launcher for a server folder, edition-aware. */
 export function findServerExecutable(
@@ -120,6 +121,7 @@ export function findServerExecutable(
  */
 export class ProcessManager {
   private readonly events: ProcessEvents;
+  private readonly spawnProcess: ProcessSpawner;
   private child: ChildProcess | null = null;
   private state: ServerState = 'offline';
   private serverId: string | null = null;
@@ -130,8 +132,9 @@ export class ProcessManager {
   private statsTimer: NodeJS.Timeout | null = null;
   private stats: ServerStats = { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] };
 
-  constructor(events: ProcessEvents) {
+  constructor(events: ProcessEvents, spawnProcess: ProcessSpawner = spawn) {
     this.events = events;
+    this.spawnProcess = spawnProcess;
   }
 
   get runningServerId(): string | null {
@@ -257,7 +260,7 @@ export class ProcessManager {
     // bare filename resolves correctly and needs no quoting.
     let command = launch.command;
     let args = launch.args;
-    let env: NodeJS.ProcessEnv | undefined;
+    let env = buildChildProcessEnvironment();
     if (isCmdWrapper) {
       const launcherName =
         edition === 'bedrock' || isBatchLauncher
@@ -270,121 +273,148 @@ export class ProcessManager {
       // with the runtime the user selected, not whatever is on the system PATH.
       if (isBatchLauncher && config.javaPath) {
         const javaBin = path.dirname(config.javaPath);
-        env = {
-          ...process.env,
-          PATH: `${javaBin}${path.delimiter}${process.env.PATH ?? ''}`,
-        };
+        env = buildChildProcessEnvironment({ prependPath: javaBin });
       }
     }
 
-    const child = spawn(command, args, {
-      cwd: config.folderPath,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-      ...(env ? { env } : {}),
-    });
+    let child: ChildProcess;
+    try {
+      child = this.spawnProcess(command, args, {
+        cwd: config.folderPath,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        env,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.pushLog(`Process error: ${error.message}`, 'error');
+      this.setState('crashed', 1);
+      this.serverId = null;
+      this.startedAt = null;
+      return null;
+    }
     this.child = child;
+    child.stdin?.on('error', (error) => {
+      if (this.child === child) {
+        this.pushLog(`Server stdin closed: ${error.message}`, 'warn');
+      }
+    });
     this.startStatsTimer(child.pid);
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      const lines = splitLines(chunk.toString());
+    const handleStdoutLine = (line: string): void => {
+      if (!line) return;
       const isBedrock = edition === 'bedrock';
-      // If this chunk carries the online seed line, seed the baseline BEFORE
-      // processing deltas. The seed and a join/leave can land in the same
-      // stdout chunk; without the up-front seed the delta is silently dropped
-      // because playerCount is still null.
-      const chunkHasSeed = lines.some((l) =>
-        isBedrock ? isBedrockOnlineLine(l) : isOnlineLine(l),
-      );
-      if (chunkHasSeed && this.stats.playerCount === null) {
-        this.stats = { ...this.stats, playerCount: 0 };
+      this.pushLog(line, classifyLine(line));
+      const playerCount = isBedrock ? null : parsePlayerCount(line);
+      if (playerCount !== null) {
+        // Full player-count report: refresh the tracked names when the
+        // server lists them, otherwise keep what join/leave lines gave us.
+        const names = parsePlayerList(line);
+        let onlinePlayers = this.stats.onlinePlayers;
+        if (names !== null) {
+          onlinePlayers = names;
+        } else if (playerCount === 0) {
+          onlinePlayers = [];
+        }
+        this.stats = {
+          ...this.stats,
+          playerCount: names && names.length > 0 ? names.length : playerCount,
+          onlinePlayers,
+        };
         this.emitStats();
-      }
-      for (const line of lines) {
-        if (!line) continue;
-        this.pushLog(line, classifyLine(line));
-        const playerCount = isBedrock ? null : parsePlayerCount(line);
-        if (playerCount !== null) {
-          // Full player-count report: refresh the tracked names when the
-          // server lists them, otherwise keep what join/leave lines gave us.
-          const names = parsePlayerList(line);
-          let onlinePlayers = this.stats.onlinePlayers;
-          if (names !== null) {
-            onlinePlayers = names;
-          } else if (playerCount === 0) {
-            onlinePlayers = [];
-          }
+      } else {
+        const name = isBedrock ? parseBedrockPlayerName(line) : parsePlayerName(line);
+        const delta = isBedrock
+          ? parseBedrockPlayerDelta(line)
+          : parsePlayerDelta(line);
+        if (delta !== null && name !== null) {
+          const current = this.stats.onlinePlayers;
+          const onlinePlayers =
+            delta > 0
+              ? current.includes(name)
+                ? current
+                : [...current, name]
+              : current.filter((n) => n !== name);
           this.stats = {
             ...this.stats,
-            playerCount: names && names.length > 0 ? names.length : playerCount,
+            playerCount:
+              this.stats.playerCount === null
+                ? null
+                : Math.max(0, this.stats.playerCount + delta),
             onlinePlayers,
           };
           this.emitStats();
-        } else {
-          const name = isBedrock ? parseBedrockPlayerName(line) : parsePlayerName(line);
-          const delta = isBedrock
-            ? parseBedrockPlayerDelta(line)
-            : parsePlayerDelta(line);
-          if (delta !== null && name !== null) {
-            const current = this.stats.onlinePlayers;
-            const onlinePlayers =
-              delta > 0
-                ? current.includes(name)
-                  ? current
-                  : [...current, name]
-                : current.filter((n) => n !== name);
-            this.stats = {
-              ...this.stats,
-              playerCount:
-                this.stats.playerCount === null
-                  ? null
-                  : Math.max(0, this.stats.playerCount + delta),
-              onlinePlayers,
-            };
-            this.emitStats();
-          }
-        }
-        const online = isBedrock ? isBedrockOnlineLine(line) : isOnlineLine(line);
-        if (online) {
-          // Seed a baseline so join/leave deltas work even when the full
-          // player-count report never appears.
-          if (this.stats.playerCount === null) {
-            this.stats = { ...this.stats, playerCount: 0 };
-            this.emitStats();
-          }
-          this.setState('online');
         }
       }
-    });
 
-    child.stderr?.on('data', (chunk: Buffer) => {
-      for (const line of splitLines(chunk.toString())) {
-        if (!line) continue;
-        this.pushLog(line, 'warn');
+      const online = isBedrock ? isBedrockOnlineLine(line) : isOnlineLine(line);
+      if (online) {
+        // Seed a baseline so join/leave deltas work even when the full
+        // player-count report never appears.
+        if (this.stats.playerCount === null) {
+          this.stats = { ...this.stats, playerCount: 0 };
+          this.emitStats();
+        }
+        this.setState('online');
       }
-    });
+    };
 
-    child.on('error', (err) => {
-      this.pushLog(`Process error: ${err.message}`, 'error');
-      this.setState('crashed', 1);
+    const stdoutLines = new LineBuffer(handleStdoutLine);
+    const stderrLines = new LineBuffer((line) => {
+      if (line) this.pushLog(line, 'warn');
     });
+    child.stdout?.on('data', (chunk: Buffer | string) => stdoutLines.write(chunk));
+    child.stdout?.once('end', () => stdoutLines.finish());
+    child.stderr?.on('data', (chunk: Buffer | string) => stderrLines.write(chunk));
+    child.stderr?.once('end', () => stderrLines.finish());
 
-    child.on('exit', (code, signal) => {
+    let finalized = false;
+    const finalize = (
+      exitCode: number | null,
+      outcome: 'error' | 'close',
+      error?: Error,
+    ): void => {
+      if (finalized) return;
+      finalized = true;
+      stdoutLines.finish();
+      stderrLines.finish();
+
+      // Ignore stale events from a process that no longer belongs to this
+      // manager. In normal operation `finalized` handles this; the identity
+      // check is an additional guard against future lifecycle changes.
+      if (this.child !== child) return;
+
       this.child = null;
       this.clearStatsTimer();
-      const exitCode = code ?? (signal ? 1 : null);
-      this.pushLog(`Process exited (code ${exitCode})`, 'info');
-
       const wasStopping = this.state === 'stopping';
-      if (wasStopping) {
-        this.setState('offline', exitCode);
-      } else if (this.state === 'starting' || this.state === 'online') {
-        this.setState('crashed', exitCode);
+
+      if (outcome === 'error') {
+        this.pushLog(`Process error: ${error?.message ?? 'unknown spawn error'}`, 'error');
+        this.setState('crashed', exitCode ?? 1);
       } else {
-        this.setState('offline', exitCode);
+        this.pushLog(`Process exited (code ${exitCode})`, 'info');
+        if (wasStopping) {
+          this.setState('offline', exitCode);
+        } else if (this.state === 'starting' || this.state === 'online') {
+          this.setState('crashed', exitCode);
+        } else {
+          this.setState('offline', exitCode);
+        }
       }
+
       this.serverId = null;
       this.startedAt = null;
+    };
+
+    child.on('error', (err) => {
+      finalize(1, 'error', err);
+    });
+
+    // `close` fires after stdio has closed, so all complete lines and the one
+    // final unterminated line have been delivered before lifecycle cleanup.
+    child.on('close', (code, signal) => {
+      const exitCode = code ?? (signal ? 1 : null);
+      finalize(exitCode, 'close');
     });
 
     return null;
@@ -401,12 +431,14 @@ export class ProcessManager {
       // stdin may be closed already; fall through to kill
     }
     const child = this.child;
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       if (this.child === child) {
         this.pushLog('Graceful stop timed out, terminating process', 'warn');
         this.forceKill();
       }
     }, 20000);
+    timer.unref();
+    child.once('close', () => clearTimeout(timer));
   }
 
   /** Force-kill the child process, including its tree on Windows. */
@@ -421,6 +453,7 @@ export class ProcessManager {
         spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
           stdio: 'ignore',
           windowsHide: true,
+          env: buildChildProcessEnvironment(),
         });
         return;
       } catch {
@@ -468,6 +501,20 @@ export class ProcessManager {
     this.forceKill();
   }
 
+  /** Stop cleanly when possible, then force-kill the complete process tree. */
+  async shutdownGracefully(gracefulTimeoutMs = 10_000, forceTimeoutMs = 2_000): Promise<void> {
+    this.clearStatsTimer();
+    const child = this.child;
+    if (!child) return;
+
+    this.stop();
+    if (await waitForChildExit(child, gracefulTimeoutMs)) return;
+
+    this.pushLog('Shutdown grace period expired; force-killing server descendants', 'warn');
+    this.forceKill();
+    await waitForChildExit(child, forceTimeoutMs);
+  }
+
   private startStatsTimer(pid: number | undefined): void {
     this.clearStatsTimer();
     if (!pid) return;
@@ -502,8 +549,47 @@ export class ProcessManager {
   }
 }
 
-function splitLines(text: string): string[] {
-  return text.split(/\r?\n/);
+/**
+ * Reassembles UTF-8 text lines across arbitrary stream chunk boundaries.
+ * `finish()` is idempotent and emits one final unterminated line, if present.
+ */
+class LineBuffer {
+  private readonly decoder = new StringDecoder('utf8');
+  private pending = '';
+  private finished = false;
+
+  constructor(private readonly onLine: (line: string) => void) {}
+
+  write(chunk: Buffer | string): void {
+    if (this.finished) return;
+    this.pending += typeof chunk === 'string' ? chunk : this.decoder.write(chunk);
+    this.emitCompleteLines();
+  }
+
+  finish(): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.pending += this.decoder.end();
+    this.emitCompleteLines();
+    if (this.pending.length > 0) {
+      this.onLine(stripCarriageReturn(this.pending));
+      this.pending = '';
+    }
+  }
+
+  private emitCompleteLines(): void {
+    let newline = this.pending.indexOf('\n');
+    while (newline >= 0) {
+      const line = this.pending.slice(0, newline);
+      this.pending = this.pending.slice(newline + 1);
+      this.onLine(stripCarriageReturn(line));
+      newline = this.pending.indexOf('\n');
+    }
+  }
+}
+
+function stripCarriageReturn(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
 }
 
 /** Detect the "Done" line that marks a Vanilla/Patch server as online. */
@@ -575,6 +661,27 @@ export function parseBedrockPlayerDelta(line: string): number | null {
   if (/Player connected:/.test(line)) return 1;
   if (/Player disconnected:/.test(line)) return -1;
   return null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('close', onClose);
+      child.off('error', onClose);
+      resolve(exited);
+    };
+    const onClose = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+    timer.unref();
+    child.once('close', onClose);
+    child.once('error', onClose);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
+  });
 }
 
 function round1(value: number): number {

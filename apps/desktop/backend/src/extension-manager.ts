@@ -1,9 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import yauzl from 'yauzl';
 import type { ExtensionEntry, ExtensionListResponse, ServerFlavor } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
 import { extensionFolderFor, flavorMeta } from './server-types';
+import { requireServerEdition } from './server-edition';
+import {
+  ServerOperationConflictError,
+  type ServerOperationCoordinator,
+} from './server-operation-coordinator';
 
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1 GB safety cap
 const DISABLED_SUFFIX = '.disabled';
@@ -16,10 +22,12 @@ const DISABLED_SUFFIX = '.disabled';
  */
 export class ExtensionManagerService {
   private readonly db: DatabaseResult;
+  private readonly coordinator: ServerOperationCoordinator | null;
   private runningServerId: (() => string | null) | null = null;
 
-  constructor(db: DatabaseResult) {
+  constructor(db: DatabaseResult, coordinator: ServerOperationCoordinator | null = null) {
     this.db = db;
+    this.coordinator = coordinator;
   }
 
   setRunningServerId(fn: () => string | null): void {
@@ -32,8 +40,7 @@ export class ExtensionManagerService {
 
   /** Absolute path to the server's extension folder, or null for Vanilla. */
   private extensionDir(serverId: string): { flavor: ServerFlavor; dir: string | null } {
-    const record = this.db.getServer(serverId);
-    if (!record) return { flavor: 'vanilla', dir: null };
+    const record = requireServerEdition(this.db, serverId, 'java');
     const meta = flavorMeta(record.serverType);
     if (!meta?.extensionFolder) return { flavor: record.serverType as ServerFlavor, dir: null };
     return { flavor: record.serverType as ServerFlavor, dir: path.join(record.folderPath, meta.extensionFolder) };
@@ -87,6 +94,10 @@ export class ExtensionManagerService {
 
   /** Enable a disabled extension: rename <name>.jar.disabled -> <name>.jar. */
   enable(serverId: string, name: string): { ok: boolean; error?: string } {
+    return this.withMutation(serverId, () => this.enableUnlocked(serverId, name));
+  }
+
+  private enableUnlocked(serverId: string, name: string): { ok: boolean; error?: string } {
     const err = this.mutationGuard(serverId, name);
     if (err) return err;
     const { dir } = this.extensionDir(serverId);
@@ -99,6 +110,10 @@ export class ExtensionManagerService {
 
   /** Disable an enabled extension: rename <name>.jar -> <name>.jar.disabled. */
   disable(serverId: string, name: string): { ok: boolean; error?: string } {
+    return this.withMutation(serverId, () => this.disableUnlocked(serverId, name));
+  }
+
+  private disableUnlocked(serverId: string, name: string): { ok: boolean; error?: string } {
     const err = this.mutationGuard(serverId, name);
     if (err) return err;
     const { dir } = this.extensionDir(serverId);
@@ -111,6 +126,10 @@ export class ExtensionManagerService {
 
   /** Delete an extension file (enabled or disabled). */
   delete(serverId: string, name: string): { ok: boolean; error?: string } {
+    return this.withMutation(serverId, () => this.deleteUnlocked(serverId, name));
+  }
+
+  private deleteUnlocked(serverId: string, name: string): { ok: boolean; error?: string } {
     const err = this.mutationGuard(serverId, name);
     if (err) return err;
     const { dir } = this.extensionDir(serverId);
@@ -125,36 +144,99 @@ export class ExtensionManagerService {
   }
 
   /** Copy uploaded files into the extension folder, validating type + size. */
-  upload(
+  async upload(
     serverId: string,
-    files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
-  ): { ok: boolean; error?: string; added: string[] } {
-    const { dir } = this.extensionDir(serverId);
+    filePaths: string[],
+  ): Promise<{ ok: boolean; error?: string; added: string[] }> {
+    let operationId: string | null = null;
+    try {
+      const operation = this.coordinator?.acquire(serverId, 'extension-mutation');
+      operationId = operation?.operationId ?? null;
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { ok: false, error: error.message, added: [] };
+      }
+      throw error;
+    }
+    try {
+      return await this.uploadUnlocked(serverId, filePaths);
+    } finally {
+      if (operationId) this.coordinator?.release(serverId, operationId);
+    }
+  }
+
+  private async uploadUnlocked(
+    serverId: string,
+    filePaths: string[],
+  ): Promise<{ ok: boolean; error?: string; added: string[] }> {
+    const { dir, flavor } = this.extensionDir(serverId);
     if (!dir) return { ok: false, error: 'This server type does not support mods/plugins', added: [] };
-    const record = this.db.getServer(serverId);
-    if (!record) return { ok: false, error: 'Server not found', added: [] };
     if (this.isServerRunning(serverId)) {
       return { ok: false, error: 'Stop the server before adding mods/plugins', added: [] };
     }
     fs.mkdirSync(dir, { recursive: true });
+    const staging = path.join(dir, `.msc-import-${crypto.randomUUID()}`);
+    fs.mkdirSync(staging, { recursive: true });
     const added: string[] = [];
-    for (const file of files) {
-      const base = path.basename(file.name);
-      if (!base.endsWith('.jar')) {
-        return { ok: false, error: `Only .jar files are allowed (${base})`, added: [] };
+    const committed: string[] = [];
+    try {
+      for (const sourcePath of filePaths) {
+        const before = fs.lstatSync(sourcePath);
+        const base = path.basename(sourcePath);
+        if (!before.isFile() || before.isSymbolicLink()) {
+          throw new Error(`Not a regular file: ${base}`);
+        }
+        if (path.extname(base).toLowerCase() !== '.jar') {
+          throw new Error(`Only .jar files are allowed (${base})`);
+        }
+        if (before.size <= 0 || before.size > MAX_UPLOAD_BYTES) {
+          throw new Error(before.size <= 0 ? `File is empty: ${base}` : `${base} exceeds the 1 GB upload limit`);
+        }
+        if (fs.existsSync(path.join(dir, base))) throw new Error(`File already exists: ${base}`);
+        const staged = path.join(staging, base);
+        await fs.promises.copyFile(sourcePath, staged, fs.constants.COPYFILE_EXCL);
+        const after = fs.lstatSync(sourcePath);
+        if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+          throw new Error(`File changed while it was being imported: ${base}`);
+        }
+        if (!(await inspectJar(staged, flavor))) {
+          throw new Error(`The selected file is not a recognized ${flavor} mod/plugin JAR: ${base}`);
+        }
+        added.push(base);
       }
-      if (file.sizeBytes > MAX_UPLOAD_BYTES) {
-        return { ok: false, error: `${base} exceeds the 1 GB upload limit`, added: [] };
+      for (const base of added) {
+        const destination = path.join(dir, base);
+        await fs.promises.rename(path.join(staging, base), destination);
+        committed.push(destination);
       }
-      if (!file.contentBase64) {
-        return { ok: false, error: `File is empty: ${base}`, added: [] };
-      }
-      // Sanitize the destination name (no path traversal).
-      const dest = path.join(dir, base);
-      fs.writeFileSync(dest, Buffer.from(file.contentBase64, 'base64'));
-      added.push(base);
+      return { ok: true, added };
+    } catch (error) {
+      for (const destination of committed) fs.rmSync(destination, { force: true });
+      return { ok: false, error: error instanceof Error ? error.message : String(error), added: [] };
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
     }
-    return { ok: true, added };
+  }
+
+  private withMutation(
+    serverId: string,
+    mutation: () => { ok: boolean; error?: string },
+  ): { ok: boolean; error?: string } {
+    let operationId: string | null = null;
+    try {
+      const operation = this.coordinator?.acquire(serverId, 'extension-mutation');
+      operationId = operation?.operationId ?? null;
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { ok: false, error: error.message };
+      }
+      throw error;
+    }
+    try {
+      return mutation();
+    } finally {
+      if (operationId) this.coordinator?.release(serverId, operationId);
+    }
   }
 
   private mutationGuard(serverId: string, name: string): { ok: false; error: string } | null {

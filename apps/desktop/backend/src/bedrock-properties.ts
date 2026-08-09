@@ -12,8 +12,9 @@ import {
   validateBedrockProperty,
   BEDROCK_SERVER_PROPERTIES_SCHEMA,
 } from './bedrock-server-properties-schema';
-import { parseProperties, serializeProperties } from './properties';
+import { atomicWriteTextFile, parseProperties, serializeProperties } from './properties';
 import type { DatabaseResult } from './db';
+import { requireServerEdition } from './server-edition';
 
 export interface BedrockPropertyValidationResult {
   ok: boolean;
@@ -33,15 +34,13 @@ export class BedrockPropertiesService {
   }
 
   private propertiesPath(serverId: string): string {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'bedrock');
     return path.join(record.folderPath, 'server.properties');
   }
 
   /** Read the current document. If the file is absent, use defaults. */
   read(serverId: string): ServerPropertiesDocument {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'bedrock');
 
     const filePath = this.propertiesPath(serverId);
     const file = fs.existsSync(filePath)
@@ -85,6 +84,10 @@ export class BedrockPropertiesService {
   validate(serverId: string, values: Record<string, string>): BedrockPropertyValidationResult {
     const errors: Record<string, string> = {};
     for (const [key, raw] of Object.entries(values)) {
+      if (/[\r\n]/.test(raw)) {
+        errors[key] = 'Property values cannot contain line breaks';
+        continue;
+      }
       const field = getBedrockPropertyField(key);
       if (!field) {
         errors[key] = 'Unknown property';
@@ -108,8 +111,7 @@ export class BedrockPropertiesService {
       return { document: this.read(serverId), validation };
     }
 
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'bedrock');
     const filePath = this.propertiesPath(serverId);
 
     // Back up the current state (if the file exists) before touching it.
@@ -140,7 +142,7 @@ export class BedrockPropertiesService {
     }
 
     const newText = serializeProperties(existing, overrides);
-    fs.writeFileSync(filePath, newText, 'utf8');
+    atomicWriteTextFile(filePath, newText);
 
     const document = this.read(serverId);
     document.lastBackupPath = lastBackupPath;

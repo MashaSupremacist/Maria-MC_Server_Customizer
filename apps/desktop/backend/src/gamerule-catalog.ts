@@ -34,8 +34,6 @@ export const GAMERULE_DEFS: Array<GameruleDef & { since: string }> = [
   { key: 'doImmediateRespawn', category: 'Player', type: 'boolean', description: 'Players respawn immediately without the death screen.', defaultValue: false, since: '1.15' },
   { key: 'naturalRegeneration', category: 'Player', type: 'boolean', description: 'Players regenerate health naturally.', defaultValue: true, since: '1.8' },
   { key: 'doInsomnia', category: 'Gameplay', type: 'boolean', description: 'Phantoms spawn for players who have not slept.', defaultValue: true, since: '1.10' },
-  { key: 'doMobSpawning', category: 'Spawning', type: 'boolean', description: 'Entities spawn naturally.', defaultValue: true, since: '1.8' },
-
   // World
   { key: 'spawnRadius', category: 'World', type: 'integer', description: 'Radius of the world spawn area.', defaultValue: 10, min: 0, max: 100, since: '1.8' },
   { key: 'randomTickSpeed', category: 'World', type: 'integer', description: 'Random ticks per block (0 disables).', defaultValue: 3, min: 0, max: 256, since: '1.8' },

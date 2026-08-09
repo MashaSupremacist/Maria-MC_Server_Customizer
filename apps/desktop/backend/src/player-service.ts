@@ -9,6 +9,7 @@ import type {
 import type { DatabaseResult } from './db';
 import type { ServerManagerService } from './server-manager';
 import { gamerulesForVersion, getGameruleDef } from './gamerule-catalog';
+import { requireServerEdition } from './server-edition';
 
 export interface CommandRunner {
   (serverId: string, command: string): boolean;
@@ -33,8 +34,7 @@ export class PlayerService {
   }
 
   private recordPath(serverId: string): string {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'java');
     return record.folderPath;
   }
 
@@ -44,8 +44,7 @@ export class PlayerService {
 
   /** Read gamerules: online via command, offline via the world's gamerules.json. */
   readGamerules(serverId: string): GamerulesDocument {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'java');
     const offline = !this.isOnline(serverId);
     const defs = gamerulesForVersion(record.version);
 
@@ -87,6 +86,7 @@ export class PlayerService {
 
   /** Update a gamerule. Online: send the command. Offline: edit gamerules.json. */
   updateGamerule(serverId: string, key: string, rawValue: string): CommandResult {
+    requireServerEdition(this.db, serverId, 'java');
     const def = getGameruleDef(key);
     if (!def) return { ok: false, error: `Unknown gamerule: ${key}` };
 

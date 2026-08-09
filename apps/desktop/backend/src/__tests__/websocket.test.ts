@@ -37,6 +37,9 @@ process.on('SIGTERM', () => process.exit(0));
       `@echo off\r\nnode "%~dp0fake-server.js" %*\r\n`,
     );
     fs.writeFileSync(path.join(serverDir, 'server.jar'), 'fake');
+    // Marks this synthetic fixture as launcher-managed so production Java
+    // version detection does not try to execute cmd.exe as java.exe.
+    fs.writeFileSync(path.join(serverDir, 'start.bat'), '@echo off\r\n');
     fs.writeFileSync(path.join(serverDir, 'eula.txt'), 'eula=true\n');
 
     const created = await app.inject({
@@ -100,6 +103,7 @@ process.on('SIGTERM', () => process.exit(0));
       method: 'POST',
       url: '/process/stop',
       headers: { 'x-msc-token': TOKEN },
+      payload: { serverId },
     });
     await waitFor(async () => {
       const status = await app.inject({

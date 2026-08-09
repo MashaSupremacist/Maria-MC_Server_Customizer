@@ -12,8 +12,9 @@ import {
   validateProperty,
   SERVER_PROPERTIES_SCHEMA,
 } from './server-properties-schema';
-import { parseProperties, serializeProperties } from './properties';
+import { atomicWriteTextFile, parseProperties, serializeProperties } from './properties';
 import type { DatabaseResult } from './db';
+import { requireServerEdition } from './server-edition';
 
 export interface PropertyValidationResult {
   ok: boolean;
@@ -33,15 +34,13 @@ export class ServerPropertiesService {
   }
 
   private propertiesPath(serverId: string): string {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'java');
     return path.join(record.folderPath, 'server.properties');
   }
 
   /** Read the current document. If the file is absent, use defaults. */
   read(serverId: string): ServerPropertiesDocument {
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'java');
 
     const filePath = this.propertiesPath(serverId);
     const file = fs.existsSync(filePath)
@@ -88,6 +87,10 @@ export class ServerPropertiesService {
   validate(serverId: string, values: Record<string, string>): PropertyValidationResult {
     const errors: Record<string, string> = {};
     for (const [key, raw] of Object.entries(values)) {
+      if (/[\r\n]/.test(raw)) {
+        errors[key] = 'Property values cannot contain line breaks';
+        continue;
+      }
       const field = getPropertyField(key);
       if (!field) {
         errors[key] = 'Unknown property';
@@ -112,8 +115,7 @@ export class ServerPropertiesService {
       return { document: this.read(serverId), validation };
     }
 
-    const record = this.db.getServer(serverId);
-    if (!record) throw new Error(`No server record with id ${serverId}`);
+    const record = requireServerEdition(this.db, serverId, 'java');
     const filePath = this.propertiesPath(serverId);
 
     // Back up the current state (if the file exists) before touching it.
@@ -145,7 +147,7 @@ export class ServerPropertiesService {
     }
 
     const newText = serializeProperties(existing, overrides);
-    fs.writeFileSync(filePath, newText, 'utf8');
+    atomicWriteTextFile(filePath, newText);
 
     const document = this.read(serverId);
     document.lastBackupPath = lastBackupPath;

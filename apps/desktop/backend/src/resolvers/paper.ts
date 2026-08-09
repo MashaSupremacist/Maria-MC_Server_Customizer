@@ -1,4 +1,5 @@
 import type { FlavorResolver, ResolvedDownload } from './types';
+import { fetchMetadataJson } from '../metadata-fetch';
 
 const PAPER_API = 'https://fill.papermc.io/v3/projects/paper';
 
@@ -30,25 +31,38 @@ interface BuildResponse {
 export class PaperResolver implements FlavorResolver {
   private readonly fetchImpl: typeof fetch;
   private readonly apiUrl: string;
+  private readonly metadataTimeoutMs: number;
 
-  constructor(options: { fetchImpl?: typeof fetch; apiUrl?: string } = {}) {
+  constructor(options: {
+    fetchImpl?: typeof fetch;
+    apiUrl?: string;
+    metadataTimeoutMs?: number;
+  } = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.apiUrl = options.apiUrl ?? PAPER_API;
+    this.metadataTimeoutMs = options.metadataTimeoutMs ?? 15_000;
   }
 
   /** Minecraft versions with Paper builds, newest first. */
   async listVersions(): Promise<string[]> {
-    const res = await this.fetchImpl(this.apiUrl);
+    const res = await fetchMetadataJson<ProjectResponse>(this.apiUrl, {
+      fetchImpl: this.fetchImpl,
+      timeoutMs: this.metadataTimeoutMs,
+    });
     if (!res.ok) throw new Error(`Failed to fetch Paper versions (${res.status})`);
-    const data = (await res.json()) as ProjectResponse;
+    const data = res.value;
     return Object.keys(data.versions).sort(compareVersions).reverse();
   }
 
   /** Build numbers for a version, newest first. */
-  async listBuilds(version: string): Promise<number[]> {
-    const res = await this.fetchImpl(`${this.apiUrl}/versions/${version}`);
+  async listBuilds(version: string, signal?: AbortSignal): Promise<number[]> {
+    const res = await fetchMetadataJson<BuildsResponse>(`${this.apiUrl}/versions/${version}`, {
+      fetchImpl: this.fetchImpl,
+      signal,
+      timeoutMs: this.metadataTimeoutMs,
+    });
     if (!res.ok) throw new Error(`Failed to fetch Paper builds for ${version} (${res.status})`);
-    const data = (await res.json()) as BuildsResponse;
+    const data = res.value;
     return [...data.builds].reverse();
   }
 
@@ -60,8 +74,9 @@ export class PaperResolver implements FlavorResolver {
   async resolveDownloads(request: {
     version: string;
     paperBuild?: string;
+    signal?: AbortSignal;
   }): Promise<ResolvedDownload[]> {
-    const builds = await this.listBuilds(request.version);
+    const builds = await this.listBuilds(request.version, request.signal);
     if (builds.length === 0) {
       throw new Error(`No Paper build available for Minecraft ${request.version}`);
     }
@@ -69,20 +84,28 @@ export class PaperResolver implements FlavorResolver {
     if (!builds.includes(build)) {
       throw new Error(`Paper build ${build} not found for Minecraft ${request.version}`);
     }
-    const res = await this.fetchImpl(
+    const res = await fetchMetadataJson<BuildResponse>(
       `${this.apiUrl}/versions/${request.version}/builds/${build}`,
+      {
+        fetchImpl: this.fetchImpl,
+        signal: request.signal,
+        timeoutMs: this.metadataTimeoutMs,
+      },
     );
     if (!res.ok) {
       throw new Error(`Failed to fetch Paper build ${build} (${res.status})`);
     }
-    const data = (await res.json()) as BuildResponse;
+    const data = res.value;
     const app = data.downloads?.['server:default'];
     if (!app) {
       throw new Error(`Paper build ${build} has no server download`);
     }
     return [{
       url: app.url,
-      sha1: undefined,
+      digest: app.checksums.sha256
+        ? { algorithm: 'sha256', value: app.checksums.sha256 }
+        : undefined,
+      sizeBytes: app.size,
       fileName: `paper-${request.version}-${build}.jar`,
     }];
   }

@@ -64,7 +64,7 @@ function makeBareServerZip(filePath: string, mcVersion = '1.7.10'): Promise<void
 /** Build a batch-launcher-only pack: a start.bat that references a server jar. */
 function makeBatchLauncherZip(
   filePath: string,
-  options: { launcher?: string; batContent?: string } = {},
+  options: { launcher?: string; batContent?: string; prefix?: string } = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const zip = new yazl.ZipFile();
@@ -73,9 +73,9 @@ function makeBatchLauncherZip(
         options.batContent ??
           '@echo off\r\njava -Xmx2G -jar libraries/net/minecraft/server/1.7.10/server.jar nogui\r\n',
       ),
-      options.launcher ?? 'start.bat',
+      `${options.prefix ?? ''}${options.launcher ?? 'start.bat'}`,
     );
-    zip.addBuffer(Buffer.from('fake lib'), 'libraries/net/minecraft/server/1.7.10/server.jar');
+    zip.addBuffer(Buffer.from('fake lib'), `${options.prefix ?? ''}libraries/net/minecraft/server/1.7.10/server.jar`);
     const output = fs.createWriteStream(filePath);
     output.on('error', reject);
     output.on('close', resolve);
@@ -152,6 +152,12 @@ describe.sequential('PackInstallerService', () => {
         version: string;
         serverFolder: string;
       }) => {
+        const launchJar = req.flavor === 'forge'
+          ? `forge-${req.version}-test.jar`
+          : req.flavor === 'fabric'
+            ? 'fabric-server-launch.jar'
+            : 'server.jar';
+        fs.writeFileSync(path.join(req.serverFolder, launchJar), 'server');
         fs.writeFileSync(
           path.join(req.serverFolder, 'bootstrap-jar-was-here.txt'),
           `${req.flavor} ${req.version}`,
@@ -306,6 +312,24 @@ describe.sequential('PackInstallerService', () => {
       fs.existsSync(path.join(record.folderPath, 'libraries', 'net', 'minecraft', 'server', '1.7.10', 'server.jar')),
     ).toBe(true);
     expect(fs.existsSync(path.join(record.folderPath, 'eula.txt'))).toBe(true);
+  });
+
+  it('strips one common archive folder and commits a runnable root launcher', async () => {
+    const pack = path.join(dataDir, 'wrapped-launcher.zip');
+    await makeBatchLauncherZip(pack, { prefix: 'Downloaded Pack/' });
+    const inspection = await service.inspect(pack);
+    expect(inspection.ok).toBe(true);
+    expect(inspection.hasLauncher).toBe(true);
+
+    const result = await service.create({
+      filePath: pack,
+      name: 'Wrapped Launcher Pack',
+      acceptEula: true,
+    });
+    expect(result.ok).toBe(true);
+    const folder = result.server!.folderPath;
+    expect(fs.existsSync(path.join(folder, 'start.bat'))).toBe(true);
+    expect(fs.existsSync(path.join(folder, 'Downloaded Pack'))).toBe(false);
   });
 
   it('rejects creation without EULA', async () => {

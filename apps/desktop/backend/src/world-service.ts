@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import type {
   ImportWorldRequest,
   SaveFolderSuggestion,
+  ServerRecord,
   WorldDiscoveryResult,
   WorldImportProgress,
   WorldInfo,
@@ -12,6 +13,12 @@ import type {
 } from '@msc/shared-types';
 import type { DatabaseResult } from './db';
 import { readWorldMetadata } from './nbt';
+import { replaceDirectoryAtomically } from './fs-transaction';
+import { requireServerEdition } from './server-edition';
+import {
+  ServerOperationConflictError,
+  type ServerOperationCoordinator,
+} from './server-operation-coordinator';
 
 export type WsBroadcast = (event: WsServerEvent) => void;
 
@@ -33,11 +40,17 @@ export function suggestSaveFolders(): SaveFolderSuggestion[] {
 export class WorldService {
   private readonly db: DatabaseResult;
   private readonly broadcast: WsBroadcast;
-  private imports = new Map<string, { cancelRequested: boolean }>();
+  private readonly coordinator: ServerOperationCoordinator | null;
+  private imports = new Map<string, { cancelRequested: boolean; serverId: string }>();
 
-  constructor(db: DatabaseResult, broadcast: WsBroadcast) {
+  constructor(
+    db: DatabaseResult,
+    broadcast: WsBroadcast,
+    coordinator: ServerOperationCoordinator | null = null,
+  ) {
     this.db = db;
     this.broadcast = broadcast;
+    this.coordinator = coordinator;
   }
 
   /** Scan a folder for worlds (one level deep). */
@@ -79,8 +92,12 @@ export class WorldService {
 
   /** Import a world into a server. Returns the import id. */
   import(request: ImportWorldRequest): { importId: string; error?: string } {
-    const record = this.db.getServer(request.serverId);
-    if (!record) return { importId: '', error: 'Server not found' };
+    let record: ServerRecord;
+    try {
+      record = requireServerEdition(this.db, request.serverId, 'java');
+    } catch (error) {
+      return { importId: '', error: error instanceof Error ? error.message : String(error) };
+    }
     if (this.isServerRunning(request.serverId)) {
       return { importId: '', error: 'Stop the server before importing a world' };
     }
@@ -88,9 +105,26 @@ export class WorldService {
     if (!fs.existsSync(path.join(source, 'level.dat'))) {
       return { importId: '', error: 'Not a valid Java world (missing level.dat)' };
     }
+    try {
+      const canonicalSource = fs.realpathSync.native(source);
+      const canonicalServer = fs.realpathSync.native(record.folderPath);
+      if (samePath(canonicalSource, canonicalServer) || isPathInside(canonicalSource, canonicalServer)) {
+        return { importId: '', error: 'World source cannot contain the destination server folder' };
+      }
+    } catch (error) {
+      return { importId: '', error: error instanceof Error ? error.message : String(error) };
+    }
 
     const importId = crypto.randomUUID();
-    this.imports.set(importId, { cancelRequested: false });
+    try {
+      this.coordinator?.acquire(request.serverId, 'world-import', importId);
+    } catch (error) {
+      if (error instanceof ServerOperationConflictError) {
+        return { importId: '', error: error.message };
+      }
+      throw error;
+    }
+    this.imports.set(importId, { cancelRequested: false, serverId: request.serverId });
     void this.runImport(importId, request, record.folderPath).catch((err: unknown) => {
       this.finish(importId, {
         status: 'failed',
@@ -98,6 +132,8 @@ export class WorldService {
         message: err instanceof Error ? err.message : String(err),
         errorCode: 'io',
       });
+    }).finally(() => {
+      this.coordinator?.release(request.serverId, importId);
     });
     return { importId };
   }
@@ -105,6 +141,12 @@ export class WorldService {
   cancel(importId: string): boolean {
     const entry = this.imports.get(importId);
     if (!entry) return false;
+    if (
+      this.coordinator &&
+      !this.coordinator.requestCancel(entry.serverId, importId)
+    ) {
+      return false;
+    }
     entry.cancelRequested = true;
     return true;
   }
@@ -162,14 +204,47 @@ export class WorldService {
       message: `Copying world "${path.basename(source)}"…`,
     });
 
+    const canonicalSource = fs.realpathSync.native(source);
+    const resolvedTarget = path.resolve(targetPath);
+    if (samePath(canonicalSource, resolvedTarget) || isPathInside(canonicalSource, resolvedTarget)) {
+      throw new Error('World destination cannot be inside its source folder');
+    }
+
     const totalBytes = folderSize(source);
-    await copyDirectory(source, targetPath, (copied) => {
-      const percent = totalBytes > 0 ? Math.min(100, Math.round((copied / totalBytes) * 100)) : null;
-      this.emit(importId, { status: 'copying', percent, message: 'Copying world…' });
-    }, isCanceled);
+    let copiedBytes = 0;
+    try {
+      await replaceDirectoryAtomically(
+        targetPath,
+        async (stagingPath) => {
+          await copyDirectory(
+            source,
+            stagingPath,
+            (chunkBytes) => {
+              copiedBytes += chunkBytes;
+              const percent = totalBytes > 0
+                ? Math.min(100, Math.round((copiedBytes / totalBytes) * 100))
+                : null;
+              this.emit(importId, { status: 'copying', percent, message: 'Copying world…' });
+            },
+            isCanceled,
+          );
+        },
+        async (stagingPath) => {
+          if (isCanceled()) throw new WorldImportCanceledError();
+          if (!fs.existsSync(path.join(stagingPath, 'level.dat'))) {
+            throw new Error('Imported world is incomplete (missing level.dat)');
+          }
+        },
+      );
+    } catch (error) {
+      if (isCanceled() || error instanceof WorldImportCanceledError) {
+        this.finish(importId, { status: 'canceled', percent: null, message: 'Import canceled' });
+        return;
+      }
+      throw error;
+    }
 
     if (isCanceled()) {
-      fs.rmSync(targetPath, { recursive: true, force: true });
       this.finish(importId, { status: 'canceled', percent: null, message: 'Import canceled' });
       return;
     }
@@ -221,22 +296,24 @@ async function copyDirectory(
   onProgress: (copiedBytes: number) => void,
   isCanceled: () => boolean,
 ): Promise<void> {
+  if (isCanceled()) throw new WorldImportCanceledError();
   fs.mkdirSync(dest, { recursive: true });
-  let copied = 0;
   const entries = fs.readdirSync(src, { withFileTypes: true });
   for (const entry of entries) {
-    if (isCanceled()) return;
+    if (isCanceled()) throw new WorldImportCanceledError();
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`World source contains a symbolic link or junction: ${srcPath}`);
+    }
     if (entry.isDirectory()) {
       await copyDirectory(srcPath, destPath, onProgress, isCanceled);
     } else if (entry.isFile()) {
-      if (isCanceled()) return;
+      if (isCanceled()) throw new WorldImportCanceledError();
       const stat = fs.statSync(srcPath);
       await copyFileWithProgress(srcPath, destPath, stat.size, (n) => {
-        copied += n;
-        onProgress(copied);
-      });
+        onProgress(n);
+      }, isCanceled);
     }
   }
 }
@@ -246,14 +323,43 @@ function copyFileWithProgress(
   dest: string,
   size: number,
   onChunk: (bytes: number) => void,
+  isCanceled: () => boolean,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const read = fs.createReadStream(src);
     const write = fs.createWriteStream(dest);
-    read.on('data', (chunk: string | Buffer) => onChunk(Buffer.byteLength(chunk)));
+    read.on('data', (chunk: string | Buffer) => {
+      if (isCanceled()) {
+        read.destroy(new WorldImportCanceledError());
+        write.destroy(new WorldImportCanceledError());
+        return;
+      }
+      onChunk(Buffer.byteLength(chunk));
+    });
     read.on('error', reject);
     write.on('error', reject);
     write.on('close', resolve);
     read.pipe(write);
   });
+}
+
+class WorldImportCanceledError extends Error {
+  constructor() {
+    super('World import canceled');
+    this.name = 'WorldImportCanceledError';
+  }
+}
+
+function comparisonPath(value: string): string {
+  const resolved = path.resolve(value).replace(/[\\/]+$/, '');
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function samePath(left: string, right: string): boolean {
+  return comparisonPath(left) === comparisonPath(right);
+}
+
+function isPathInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
 }

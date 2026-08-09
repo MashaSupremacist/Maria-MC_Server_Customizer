@@ -130,6 +130,16 @@ describe('PlayitService', () => {
     expect(service.stateOf()).toBe('offline');
   });
 
+  it('graceful shutdown waits for Playit to exit', async () => {
+    service.start(path.join(dataDir, 'fake-playit.cmd'));
+    await waitFor(() => service.stateOf() === 'online');
+
+    await service.shutdownGracefully(4000, 1000);
+
+    expect(service.isRunning()).toBe(false);
+    expect(service.stateOf()).toBe('offline');
+  });
+
   it('force-kill ends the process', async () => {
     service.start(path.join(dataDir, 'fake-playit.cmd'));
     await waitFor(() => service.stateOf() === 'online');

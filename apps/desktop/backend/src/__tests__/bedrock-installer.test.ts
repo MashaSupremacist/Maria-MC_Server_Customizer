@@ -20,11 +20,17 @@ function collectWritable(chunks: Buffer[]): Writable {
 }
 
 /** Fake BDS registry + file server over one local HTTP server. */
-function startFakeServer(): Promise<{ baseUrl: string; server: Server; zipSha256: string }> {
+function startFakeServer(options: { includeExecutable?: boolean } = {}): Promise<{
+  baseUrl: string;
+  server: Server;
+  zipSha256: string;
+}> {
   return new Promise((resolve) => {
     // A minimal BDS-like zip: bedrock_server.exe + a nested file.
     const zip = new yazl.ZipFile();
-    zip.addBuffer(Buffer.from('fake exe'), 'bedrock_server.exe');
+    if (options.includeExecutable !== false) {
+      zip.addBuffer(Buffer.from('fake exe'), 'bedrock_server.exe');
+    }
     zip.addBuffer(Buffer.from('{}'), 'worlds/server.properties');
     zip.end();
     const chunks: Buffer[] = [];
@@ -104,7 +110,11 @@ describe.sequential('BedrockInstallerService', () => {
     db = openDatabase(dataDir);
     db.setSetting('serverLibraryPath', library);
     fake = await startFakeServer();
-    service = new BedrockInstallerService(db, (event) => {
+    service = buildService(db);
+  }
+
+  function buildService(database: DatabaseResult): BedrockInstallerService {
+    return new BedrockInstallerService(database, (event) => {
       if (event.type === 'install:progress') {
         events.push({ installId: event.installId, progress: event.progress });
       }
@@ -154,6 +164,53 @@ describe.sequential('BedrockInstallerService', () => {
     expect(fs.existsSync(path.join(record!.folderPath, 'permissions.json'))).toBe(true);
     expect(fs.readFileSync(path.join(record!.folderPath, 'server.properties'), 'utf8')).toContain('server-port=19132');
     expect(fs.existsSync(path.join(record!.folderPath, 'bedrock-server.zip'))).toBe(false);
+    expect(record?.folderOwned).toBe(true);
+    expect(fs.readdirSync(library).some((name) => name.includes('.staging-'))).toBe(false);
+  });
+
+  it('removes the committed Bedrock folder when database registration fails', async () => {
+    await setup();
+    let folderSeenByDatabase = '';
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === 'createServer') {
+          return (input: { folderPath: string }): never => {
+            folderSeenByDatabase = input.folderPath;
+            expect(fs.existsSync(path.join(input.folderPath, 'bedrock_server.exe'))).toBe(true);
+            expect(path.basename(input.folderPath)).toBe('bedrock-db-failure');
+            throw new Error('database insert failed');
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    service = buildService(failingDb);
+
+    await service.install({
+      name: 'Bedrock DB Failure',
+      version: '1.21.84',
+      acceptEula: true,
+    });
+    await waitForProgress('failed');
+
+    expect(folderSeenByDatabase).toBe(path.join(library, 'bedrock-db-failure'));
+    expect(db.listServers()).toHaveLength(0);
+    expect(fs.existsSync(folderSeenByDatabase)).toBe(false);
+    expect(fs.readdirSync(library)).toEqual([]);
+  });
+
+  it('rejects a staged archive without a Bedrock launch target and cleans it', async () => {
+    await setup();
+    fake.server.close();
+    fake = await startFakeServer({ includeExecutable: false });
+    service = buildService(db);
+
+    await service.install({ name: 'No Launcher', version: '1.21.84', acceptEula: true });
+    await waitForProgress('failed');
+
+    expect(db.listServers()).toHaveLength(0);
+    expect(fs.readdirSync(library)).toEqual([]);
   });
 
   it('rejects install without EULA', async () => {
@@ -182,6 +239,7 @@ describe.sequential('BedrockInstallerService', () => {
     expect(failed?.progress.errorCode).toBe('checksum');
     // No record, no leftover folder.
     expect(db.listServers()).toHaveLength(0);
+    expect(fs.readdirSync(library)).toEqual([]);
   });
 
   it('cancels mid-install and leaves no record', async () => {
@@ -191,6 +249,7 @@ describe.sequential('BedrockInstallerService', () => {
     service.cancel(installId);
     await waitForProgress('canceled');
     expect(db.listServers()).toHaveLength(0);
+    expect(fs.readdirSync(library)).toEqual([]);
   });
 
   it('fails for an unknown version', async () => {
