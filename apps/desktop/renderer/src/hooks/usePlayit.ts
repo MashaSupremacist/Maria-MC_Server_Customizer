@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LogLine, PlayitLink, PlayitSettings, PlayitState, PlayitStatus } from '@msc/shared-types';
 import { api } from '../lib/api';
-import { connectWebSocket, type WsClient } from '../lib/socket';
+import { connectWebSocket } from '../lib/socket';
 
 export interface PlayitRuntime {
   settings: PlayitSettings | null;
@@ -34,7 +34,6 @@ export function usePlayit(): PlayitRuntime {
   const [links, setLinks] = useState<PlayitLink[]>([]);
   const [detectedAddress, setDetectedAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const wsRef = useRef<WsClient | null>(null);
 
   const refreshStatus = useCallback(async (): Promise<void> => {
     try {
@@ -77,11 +76,11 @@ export function usePlayit(): PlayitRuntime {
   // Subscribe to Playit WebSocket events (shared connection).
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
     void connectWebSocket()
       .then((ws) => {
         if (cancelled) return;
-        wsRef.current = ws;
-        ws.onEvent((event) => {
+        unsubscribe = ws.onEvent((event) => {
           if (event.type === 'playit:state') {
             setState(event.state);
           } else if (event.type === 'playit:log') {
@@ -94,7 +93,7 @@ export function usePlayit(): PlayitRuntime {
       });
     return () => {
       cancelled = true;
-      wsRef.current = null;
+      unsubscribe?.();
     };
   }, []);
 
@@ -142,7 +141,7 @@ export function usePlayit(): PlayitRuntime {
         setError('No Playit executable selected. Choose one first.');
         return;
       }
-      const result = await api.startPlayit(settings.playitPath);
+      const result = await api.startPlayit();
       if (result.error) {
         setError(result.error.message);
       }

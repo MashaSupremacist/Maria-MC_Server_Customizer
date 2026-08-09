@@ -66,7 +66,7 @@ export default function App(): React.JSX.Element {
   /** True when the "add server" create view is shown, even if servers exist. */
   const [addingServer, setAddingServer] = useState(false);
 
-  const selectedServer = servers.find((s) => s.id === selectedId) ?? null;
+  const selectedServer = servers.find((s) => s.id === selectedId && s.edition === edition) ?? null;
   const runtime = useServerRuntime(selectedId);
   const install = useVanillaInstall((server) => handleServerCreated(server));
   const bedrockInstall = useBedrockInstall((server) => handleServerCreated(server));
@@ -90,7 +90,9 @@ export default function App(): React.JSX.Element {
         setLastJavaPath(settings.lastJavaPath);
         setServers(list);
         if (list.length > 0 && !selectedId) {
-          setSelectedId(list[0].id);
+          const initial = list.find((server) => server.edition === 'java') ?? list[0];
+          setEdition(initial.edition);
+          setSelectedId(initial.id);
         }
       })
       .catch((err: unknown) => {
@@ -108,6 +110,11 @@ export default function App(): React.JSX.Element {
 
   const handleEditionChange = (next: Edition): void => {
     setEdition(next);
+    setSelectedId((current) => {
+      const selected = servers.find((server) => server.id === current);
+      if (selected?.edition === next) return current;
+      return servers.find((server) => server.edition === next)?.id ?? null;
+    });
     setActivePage('dashboard');
     setAddingServer(false);
   };
@@ -130,7 +137,9 @@ export default function App(): React.JSX.Element {
     // (React StrictMode double-mounts the WS subscription in dev), so never
     // append a server that's already in the list.
     setServers((prev) => (prev.some((s) => s.id === server.id) ? prev : [...prev, server]));
+    setEdition(server.edition);
     setSelectedId(server.id);
+    setActivePage('dashboard');
     setAddingServer(false);
     // Remember the chosen java.exe for the next server.
     if (server.edition === 'java' && server.javaPath) {
@@ -158,7 +167,7 @@ export default function App(): React.JSX.Element {
     try {
       const res = await api.deleteServer(server.id, deleteFolder);
       if (!res.deleted) {
-        window.alert('Failed to delete the server.');
+        window.alert(res.error ?? 'Failed to delete the server.');
         return;
       }
       if (selectedId === server.id) setSelectedId(null);
@@ -171,7 +180,11 @@ export default function App(): React.JSX.Element {
   const refreshServers = async (): Promise<void> => {
     const list = await api.listServers();
     setServers(list);
-    setSelectedId((prev) => (prev && list.some((s) => s.id === prev) ? prev : (list[0]?.id ?? null)));
+    setSelectedId((prev) =>
+      prev && list.some((server) => server.id === prev && server.edition === edition)
+        ? prev
+        : (list.find((server) => server.edition === edition)?.id ?? null),
+    );
   };
 
   const handleNavigate = (page: string): void => {
@@ -363,14 +376,16 @@ export default function App(): React.JSX.Element {
           <UpdateBanner />
           {servers.length > 0 && (
             <div className="server-picker">
-              {servers.map((server) => (
+              {servers.filter((server) => server.edition === edition).map((server) => (
                 <div key={server.id} className="server-chip-group">
                   <button
                     type="button"
                     className={`server-chip${selectedId === server.id ? ' active' : ''}${server.folderExists ? '' : ' chip-missing'}`}
                     title={server.folderExists ? server.name : `${server.name} (folder missing on disk)`}
                     onClick={() => {
+                      setEdition(server.edition);
                       setSelectedId(server.id);
+                      setActivePage('dashboard');
                       setAddingServer(false);
                     }}
                   >

@@ -1,56 +1,65 @@
 import { type UpdateInfo } from '@msc/shared-types';
+import {
+  GITHUB_LATEST_RELEASE_API_URL,
+  GITHUB_RELEASES_URL,
+  isCanonicalReleaseUrl,
+} from './repository';
 
-/**
- * GitHub repository that hosts the app releases.
- * The check quietly returns "no update" when the repo isn't published yet.
- */
-const REPO = 'minecraft-server-customizer/minecraft-server-customizer';
-const RELEASES_API = `https://api.github.com/repos/${REPO}/releases/latest`;
-const RELEASES_URL = `https://github.com/${REPO}/releases`;
+export const UPDATE_CHECK_TIMEOUT_MS = 8_000;
 
-/**
- * Compare two semver-ish versions ("0.1.0" vs "0.1.1").
- * Returns true when candidate is newer than current.
- */
+/** Return true when a semver-like candidate is newer than the current version. */
 export function isNewerVersion(candidate: string, current: string): boolean {
-  const toParts = (v: string): number[] =>
-    v
+  const toParts = (version: string): number[] =>
+    version
       .replace(/^v/, '')
       .split(/[.-]/)
-      .map((p) => (p.match(/^\d+$/) ? parseInt(p, 10) : NaN));
+      .map((part) => (part.match(/^\d+$/) ? parseInt(part, 10) : Number.NaN));
 
-  const a = toParts(candidate);
-  const b = toParts(current);
-  const len = Math.max(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    const x = a[i] ?? 0;
-    const y = b[i] ?? 0;
-    if (x > y) return true;
-    if (x < y) return false;
+  const candidateParts = toParts(candidate);
+  const currentParts = toParts(current);
+  const length = Math.max(candidateParts.length, currentParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const candidatePart = candidateParts[index] ?? 0;
+    const currentPart = currentParts[index] ?? 0;
+    if (candidatePart > currentPart) return true;
+    if (candidatePart < currentPart) return false;
   }
   return false;
 }
 
-/**
- * Query the GitHub Releases API for the newest published version and compare
- * it with the running version. Fails soft (no update) on any network or
- * parsing error so the app never breaks because of the check.
- */
-export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo> {
-  const fallback: UpdateInfo = {
-    updateAvailable: false,
+function result(
+  checkStatus: UpdateInfo['checkStatus'],
+  currentVersion: string,
+  overrides: Partial<UpdateInfo> = {},
+): UpdateInfo {
+  return {
+    checkStatus,
+    updateAvailable: checkStatus === 'update-available',
     latestVersion: null,
     currentVersion,
     releaseUrl: null,
     notes: null,
+    ...overrides,
   };
+}
 
+/** Query the canonical GitHub Releases endpoint with a bounded request. */
+export async function checkForUpdate(
+  currentVersion: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<UpdateInfo> {
   try {
-    const response = await fetch(RELEASES_API, {
-      headers: { 'User-Agent': 'minecraft-server-customizer' },
-      signal: AbortSignal.timeout(8000),
+    const response = await fetchImpl(GITHUB_LATEST_RELEASE_API_URL, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'minecraft-server-customizer',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
     });
-    if (!response.ok) return fallback;
+    if (!response.ok) {
+      return result('failed', currentVersion, { error: `GitHub returned HTTP ${response.status}` });
+    }
 
     const release = (await response.json()) as {
       tag_name?: string;
@@ -58,20 +67,27 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateInfo
       body?: string;
       draft?: boolean;
       prerelease?: boolean;
-    };
-    if (release.draft || release.prerelease) return fallback;
+    } | null;
+    if (!release || typeof release.tag_name !== 'string' || release.tag_name.length === 0) {
+      return result('failed', currentVersion, { error: 'GitHub returned malformed release metadata' });
+    }
 
-    const latest = release.tag_name ?? '';
-    if (!latest || !isNewerVersion(latest, currentVersion)) return fallback;
+    if (release.draft || release.prerelease || !isNewerVersion(release.tag_name, currentVersion)) {
+      return result('up-to-date', currentVersion, { latestVersion: release.tag_name });
+    }
 
-    return {
-      updateAvailable: true,
-      latestVersion: latest,
-      currentVersion,
-      releaseUrl: release.html_url ?? RELEASES_URL,
-      notes: release.body?.slice(0, 500) ?? null,
-    };
-  } catch {
-    return fallback;
+    const releaseUrl =
+      typeof release.html_url === 'string' && isCanonicalReleaseUrl(release.html_url)
+        ? release.html_url
+        : GITHUB_RELEASES_URL;
+    return result('update-available', currentVersion, {
+      latestVersion: release.tag_name,
+      releaseUrl,
+      notes: typeof release.body === 'string' ? release.body.slice(0, 500) : null,
+    });
+  } catch (error) {
+    return result('failed', currentVersion, {
+      error: error instanceof Error ? error.message : 'Update request failed',
+    });
   }
 }

@@ -82,19 +82,21 @@ export default function CreateServerView({
         >
           Add Existing Server
         </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={createMethod === 'pack'}
-          className={`add-server-tab${createMethod === 'pack' ? ' active' : ''}`}
-          onClick={() => setCreateMethod('pack')}
-        >
-          From Server Pack
-        </button>
+        {edition === 'java' && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={createMethod === 'pack'}
+            className={`add-server-tab${createMethod === 'pack' ? ' active' : ''}`}
+            onClick={() => setCreateMethod('pack')}
+          >
+            From Server Pack
+          </button>
+        )}
       </div>
       {libraryPath ? (
         <div className="panel-stretch">
-          {createMethod === 'pack' ? (
+          {edition === 'java' && createMethod === 'pack' ? (
             <PackServerForm
               initialJavaPath={lastJavaPath}
               onCreated={onCreated}

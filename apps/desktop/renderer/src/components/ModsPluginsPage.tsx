@@ -36,6 +36,7 @@ const FLAVOR_LABELS: Record<string, string> = {
  * Vanilla servers show a "not supported" notice.
  */
 export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProps): React.JSX.Element {
+  const conversionStorageKey = `msc.active-server-conversion:${server.id}`;
   const [data, setData] = useState<ExtensionListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -79,20 +80,40 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
   const [convertOperationId, setConvertOperationId] = useState<string | null>(null);
 
   useEffect(() => {
+    const saved = window.sessionStorage.getItem(conversionStorageKey);
+    setConvertOperationId(saved);
+    if (saved) {
+      setBusy(true);
+      setConvert((prev) => ({
+        ...prev,
+        busy: true,
+        error: null,
+        progress: 'Recovering conversion status…',
+      }));
+    } else {
+      setBusy(false);
+      setConvert((prev) => ({ ...prev, busy: false, progress: null }));
+    }
+  }, [conversionStorageKey]);
+
+  useEffect(() => {
     let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
     void connectWebSocket().then((ws) => {
       if (cancelled) return;
-      ws.onEvent((event) => {
+      unsubscribe = ws.onEvent((event) => {
         if (event.type !== 'install:progress') return;
         if (event.installId !== convertOperationId) return;
         const progress = event.progress;
         if (progress.status === 'complete') {
+          window.sessionStorage.removeItem(conversionStorageKey);
           setBusy(false);
           setConvertOperationId(null);
           setConvert((prev) => ({ ...prev, busy: false, progress: null }));
           setNotice('Server type converted.');
           void refresh();
         } else if (progress.status === 'failed' || progress.status === 'canceled') {
+          window.sessionStorage.removeItem(conversionStorageKey);
           setBusy(false);
           setConvertOperationId(null);
           setConvert((prev) => ({ ...prev, busy: false, progress: null, error: progress.message }));
@@ -103,25 +124,50 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
     });
     return () => {
       cancelled = true;
+      unsubscribe?.();
     };
-  }, [convertOperationId, refresh]);
+  }, [conversionStorageKey, convertOperationId, refresh]);
 
-  // Defensive timeout: if the backend never emits a terminal install:progress
-  // event (e.g. WebSocket dropped), stop showing "Converting…" forever.
+  // Polling is the reliable reconciliation channel across socket loss/remount.
   useEffect(() => {
-    if (!convert.busy) return;
-    const timer = setTimeout(() => {
-      setBusy(false);
-      setConvertOperationId(null);
-      setConvert((prev) => ({
-        ...prev,
-        busy: false,
-        progress: null,
-        error: 'Conversion timed out. Check the backend connection and try again.',
-      }));
-    }, 120_000);
-    return () => clearTimeout(timer);
-  }, [convert.busy]);
+    if (!convertOperationId) return;
+    let stopped = false;
+    const reconcile = async (): Promise<void> => {
+      try {
+        const operation = await api.getOperationStatus(convertOperationId);
+        if (stopped || !operation || operation.kind !== 'server-conversion') return;
+        if (operation.state === 'succeeded') {
+          window.sessionStorage.removeItem(conversionStorageKey);
+          setBusy(false);
+          setConvertOperationId(null);
+          setConvert((prev) => ({ ...prev, busy: false, progress: null }));
+          setNotice('Server type converted.');
+          void refresh();
+        } else if (operation.state === 'failed' || operation.state === 'canceled') {
+          window.sessionStorage.removeItem(conversionStorageKey);
+          setBusy(false);
+          setConvertOperationId(null);
+          setConvert((prev) => ({
+            ...prev,
+            busy: false,
+            progress: null,
+            error: operation.message,
+          }));
+        } else {
+          setBusy(true);
+          setConvert((prev) => ({ ...prev, busy: true, progress: operation.message }));
+        }
+      } catch {
+        // Keep the session id and retry; socket delivery may still recover first.
+      }
+    };
+    void reconcile();
+    const timer = window.setInterval(() => void reconcile(), 1_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [conversionStorageKey, convertOperationId, refresh]);
 
   const requireStopped = (): boolean => {
     if (serverRunning) {
@@ -164,30 +210,12 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
     }
   };
 
-  const onFilesSelected = async (files: FileList | null): Promise<void> => {
-    if (!files || files.length === 0) return;
+  const onFilesSelected = async (): Promise<void> => {
     if (requireStopped()) return;
     setBusy(true);
     setError(null);
     try {
-      const payload = await Promise.all(
-        Array.from(files).map(
-          (f) =>
-            new Promise<{ name: string; contentBase64: string; sizeBytes: number }>(
-              (resolve, reject) => {
-                const reader = new FileReader();
-                reader.onerror = () => reject(new Error(`Failed to read ${f.name}`));
-                reader.onload = () => {
-                  const dataUrl = String(reader.result);
-                  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-                  resolve({ name: f.name, sizeBytes: f.size, contentBase64: base64 });
-                };
-                reader.readAsDataURL(f);
-              },
-            ),
-        ),
-      );
-      const res = await api.uploadExtensions(server.id, payload);
+      const res = await api.uploadExtensions(server.id);
       if (!res.ok) setError(res.error ?? 'Upload failed.');
       else setNotice(`Added ${res.added.length} file(s). Restart the server to load them.`);
       await refresh();
@@ -199,7 +227,7 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
   };
 
   const openFolder = async (): Promise<void> => {
-    const res = await api.openServerFolder(server.folderPath);
+    const res = await api.openServerFolder(server.id);
     if (!res.ok) setError(res.error ?? 'Could not open folder.');
   };
 
@@ -249,10 +277,32 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
       // Record the operation id so install:progress events are attributed to
       // this convert (the backend emits a stream keyed by operationId).
       setConvertOperationId(res.operationId);
+      window.sessionStorage.setItem(conversionStorageKey, res.operationId);
       setConvert((c) => ({ ...c, progress: 'Downloading…' }));
     } catch (err) {
       setConvert((c) => ({ ...c, busy: false, error: err instanceof Error ? err.message : String(err) }));
       setBusy(false);
+    }
+  };
+
+  const cancelConvert = async (): Promise<void> => {
+    if (!convertOperationId) return;
+    try {
+      const result = await api.cancelInstall(convertOperationId);
+      if (result.canceled) {
+        setConvert((prev) => ({ ...prev, progress: 'Canceling conversion…' }));
+      } else {
+        setConvert((prev) => ({
+          ...prev,
+          error: 'This conversion is no longer cancellable.',
+        }));
+      }
+      // Do not clear storage/state until polling or WebSocket confirms terminal.
+    } catch (err) {
+      setConvert((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : String(err),
+      }));
     }
   };
 
@@ -282,6 +332,7 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
             convert={convert}
             setConvert={setConvert}
             onConvert={() => void startConvert()}
+            onCancel={() => void cancelConvert()}
           />
         </div>
       ) : (
@@ -297,17 +348,14 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
                 : 'Mods live in the mods/ folder. Changes require a server restart.'}
             </p>
             <div className="dash-row">
-              <label className="btn btn-sm" style={{ cursor: 'pointer' }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busy || serverRunning}
+                onClick={() => void onFilesSelected()}
+              >
                 {busy ? 'Uploading…' : 'Upload .jar'}
-                <input
-                  type="file"
-                  accept=".jar"
-                  multiple
-                  hidden
-                  disabled={busy || serverRunning}
-                  onChange={(e) => void onFilesSelected(e.target.files)}
-                />
-              </label>
+              </button>
               <button type="button" className="btn btn-sm" onClick={() => void openFolder()}>
                 Open Folder
               </button>
@@ -383,6 +431,7 @@ export default function ModsPluginsPage({ server, runtime }: ModsPluginsPageProp
             convert={convert}
             setConvert={setConvert}
             onConvert={() => void startConvert()}
+            onCancel={() => void cancelConvert()}
           />
         </>
       )}
@@ -396,9 +445,10 @@ interface ConvertControlsProps {
   convert: ConvertState;
   setConvert: React.Dispatch<React.SetStateAction<ConvertState>>;
   onConvert: () => void;
+  onCancel: () => void;
 }
 
-function ConvertControls({ server, serverTypes, convert, setConvert, onConvert }: ConvertControlsProps): React.JSX.Element {
+function ConvertControls({ server, serverTypes, convert, setConvert, onConvert, onCancel }: ConvertControlsProps): React.JSX.Element {
   const options = (serverTypes.length > 0 ? serverTypes : []).filter((t) => t.id !== server.serverType);
   return (
     <div className="panel panel-stretch">
@@ -425,6 +475,11 @@ function ConvertControls({ server, serverTypes, convert, setConvert, onConvert }
         <button type="button" className="btn btn-sm" disabled={convert.busy || options.length === 0} onClick={onConvert}>
           {convert.busy ? 'Converting…' : 'Convert'}
         </button>
+        {convert.busy && (
+          <button type="button" className="btn btn-sm" onClick={onCancel}>
+            Cancel
+          </button>
+        )}
       </div>
       {convert.progress && <p className="muted">{convert.progress}</p>}
       {convert.error && <div className="error-banner">{convert.error}</div>}

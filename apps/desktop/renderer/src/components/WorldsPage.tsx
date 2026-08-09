@@ -18,6 +18,7 @@ interface ActiveImport {
 }
 
 export default function WorldsPage({ server }: WorldsPageProps): React.JSX.Element {
+  const storageKey = `msc.active-world-import.${server.id}`;
   const [scanFolder, setScanFolder] = useState<string | null>(null);
   const [result, setResult] = useState<WorldDiscoveryResult | null>(null);
   const [suggestions, setSuggestions] = useState<SaveFolderSuggestion[]>([]);
@@ -33,16 +34,28 @@ export default function WorldsPage({ server }: WorldsPageProps): React.JSX.Eleme
       .catch(() => setSuggestions([]));
   }, []);
 
+  useEffect(() => {
+    const importId = window.sessionStorage.getItem(storageKey);
+    if (importId) {
+      setImporting({
+        importId,
+        progress: { status: 'copying', percent: null, message: 'Recovering import status…' },
+      });
+    }
+  }, [storageKey]);
+
   // Subscribe to import progress.
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
     void connectWebSocket().then((ws) => {
       if (cancelled) return;
-      ws.onEvent((event) => {
+      unsubscribe = ws.onEvent((event) => {
         if (event.type !== 'world:import-progress') return;
         setImporting((prev) => {
           if (!prev || prev.importId !== event.importId) return prev;
           if (event.progress.status === 'complete' || event.progress.status === 'failed' || event.progress.status === 'canceled') {
+            window.sessionStorage.removeItem(storageKey);
             setNotice(event.progress.message);
             return null;
           }
@@ -52,8 +65,40 @@ export default function WorldsPage({ server }: WorldsPageProps): React.JSX.Eleme
     });
     return () => {
       cancelled = true;
+      unsubscribe?.();
     };
-  }, []);
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!importing) return;
+    let stopped = false;
+    const reconcile = async (): Promise<void> => {
+      try {
+        const status = await api.getOperationStatus(importing.importId);
+        if (stopped || !status || status.kind !== 'world-import') return;
+        const progress: WorldImportProgress = {
+          status: status.status as WorldImportProgress['status'],
+          percent: status.percent,
+          message: status.message,
+        };
+        if (status.state !== 'active') {
+          window.sessionStorage.removeItem(storageKey);
+          setNotice(status.message);
+          setImporting(null);
+        } else {
+          setImporting((current) => current ? { ...current, progress } : current);
+        }
+      } catch {
+        // Retry transient failures while the WebSocket remains the primary path.
+      }
+    };
+    void reconcile();
+    const timer = window.setInterval(() => void reconcile(), 1_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [importing?.importId, storageKey]);
 
   const pickFolder = async (): Promise<void> => {
     const result = await api.selectWorldFolder();
@@ -99,6 +144,7 @@ export default function WorldsPage({ server }: WorldsPageProps): React.JSX.Eleme
         importId: response.importId,
         progress: { status: 'copying', percent: 0, message: 'Starting import…' },
       });
+      window.sessionStorage.setItem(storageKey, response.importId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -107,7 +153,8 @@ export default function WorldsPage({ server }: WorldsPageProps): React.JSX.Eleme
   const cancelImport = async (): Promise<void> => {
     if (!importing) return;
     try {
-      await api.cancelWorldImport(importing.importId);
+      const result = await api.cancelWorldImport(importing.importId);
+      if (!result.canceled) setError('This import is no longer cancellable.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -143,7 +190,7 @@ export default function WorldsPage({ server }: WorldsPageProps): React.JSX.Eleme
             <button
               type="button"
               className="btn"
-              onClick={() => void api.openServerFolder(server.folderPath)}
+              onClick={() => void api.openServerFolder(server.id)}
             >
               Open Server Folder
             </button>

@@ -12,6 +12,7 @@ export default function GamerulesPage({ server }: GamerulesPageProps): React.JSX
   const [notice, setNotice] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -19,7 +20,11 @@ export default function GamerulesPage({ server }: GamerulesPageProps): React.JSX
     api
       .getGamerules(server.id)
       .then((document) => {
-        if (!cancelled) setDoc(document);
+        if (!cancelled) {
+          setDoc(document);
+          setDrafts(Object.fromEntries(document.rules.map((rule) => [rule.key, String(rule.value)])));
+          setLoadError(null);
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -60,6 +65,7 @@ export default function GamerulesPage({ server }: GamerulesPageProps): React.JSX
         // Refresh to reflect new value.
         const fresh = await api.getGamerules(server.id);
         setDoc(fresh);
+        setDrafts(Object.fromEntries(fresh.rules.map((rule) => [rule.key, String(rule.value)])));
       }
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
@@ -141,8 +147,9 @@ export default function GamerulesPage({ server }: GamerulesPageProps): React.JSX
                       id={`gr-${rule.key}`}
                       className="input input-sm"
                       type="number"
-                      value={String(rule.value)}
+                      value={drafts[rule.key] ?? String(rule.value)}
                       disabled={busy}
+                      onChange={(e) => setDrafts((current) => ({ ...current, [rule.key]: e.target.value }))}
                       onBlur={(e) => {
                         if (e.target.value !== String(rule.value)) {
                           void apply(rule.key, e.target.value);

@@ -15,6 +15,7 @@ export default function DeleteServerDialog({
   const [typed, setTyped] = useState('');
   const [deleteFolder, setDeleteFolder] = useState(false);
   const folderMissing = !server.folderExists;
+  const folderDeletable = server.folderOwned && !folderMissing;
 
   const confirmed = typed.trim() === server.name;
 
@@ -30,7 +31,7 @@ export default function DeleteServerDialog({
         <div className="dialog-details">
           <div className="dash-row">
             <span className="muted">Folder</span>
-            <span className="path-text">{server.folderPath}</span>
+            <span className="path-text">{server.canonicalFolderPath}</span>
           </div>
           {folderMissing && (
             <div className="dash-row">
@@ -43,10 +44,11 @@ export default function DeleteServerDialog({
           <input
             type="checkbox"
             checked={deleteFolder}
-            disabled={folderMissing}
+            disabled={!folderDeletable}
             onChange={(e) => setDeleteFolder(e.target.checked)}
           />
-          Also delete the server folder on disk{folderMissing ? ' (already gone)' : ''}
+          Also delete the server folder on disk
+          {folderMissing ? ' (already gone)' : !server.folderOwned ? ' (external folder is preserved)' : ''}
         </label>
 
         <div className="form-row">

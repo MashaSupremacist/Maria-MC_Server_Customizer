@@ -18,6 +18,7 @@ interface ActiveOperation {
 }
 
 export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Element {
+  const storageKey = `msc.active-backup.${server.id}`;
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState('');
@@ -43,12 +44,32 @@ export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Ele
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    const saved = window.sessionStorage.getItem(storageKey);
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved) as Pick<ActiveOperation, 'operationId' | 'kind'>;
+      setBusy(true);
+      setOperation({
+        ...parsed,
+        progress: {
+          status: parsed.kind === 'backup' ? 'creating' : 'restoring',
+          percent: null,
+          message: 'Recovering operation status…',
+        },
+      });
+    } catch {
+      window.sessionStorage.removeItem(storageKey);
+    }
+  }, [storageKey]);
+
   // Subscribe to backup progress events.
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe: (() => void) | null = null;
     void connectWebSocket().then((ws) => {
       if (cancelled) return;
-      ws.onEvent((event) => {
+      unsubscribe = ws.onEvent((event) => {
         if (event.type !== 'backup:progress') return;
         const { backupId, progress } = event;
         setOperation((prev) => {
@@ -60,6 +81,7 @@ export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Ele
           ) {
             setBusy(false);
             setNotice(progress.message);
+            window.sessionStorage.removeItem(storageKey);
             if (progress.status === 'complete') {
               void refresh();
             }
@@ -71,8 +93,42 @@ export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Ele
     });
     return () => {
       cancelled = true;
+      unsubscribe?.();
     };
-  }, [refresh]);
+  }, [refresh, storageKey]);
+
+  useEffect(() => {
+    if (!operation) return;
+    let stopped = false;
+    const reconcile = async (): Promise<void> => {
+      try {
+        const status = await api.getOperationStatus(operation.operationId);
+        if (stopped || !status || status.kind !== 'backup') return;
+        const progress: BackupProgress = {
+          status: status.status as BackupProgress['status'],
+          percent: status.percent,
+          message: status.message,
+        };
+        if (status.state !== 'active') {
+          window.sessionStorage.removeItem(storageKey);
+          setBusy(false);
+          setNotice(status.message);
+          setOperation(null);
+          if (status.state === 'succeeded') void refresh();
+        } else {
+          setOperation((current) => current ? { ...current, progress } : current);
+        }
+      } catch {
+        // Retry; live WebSocket progress remains the primary path.
+      }
+    };
+    void reconcile();
+    const timer = window.setInterval(() => void reconcile(), 1_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [operation?.operationId, refresh, storageKey]);
 
   const createBackup = async (): Promise<void> => {
     setNotice(null);
@@ -93,6 +149,7 @@ export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Ele
         kind: 'backup',
         progress: { status: 'creating', percent: 0, message: 'Starting backup…' },
       });
+      window.sessionStorage.setItem(storageKey, JSON.stringify({ operationId: response.operationId, kind: 'backup' }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -116,6 +173,17 @@ export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Ele
         kind: 'restore',
         progress: { status: 'restoring', percent: 0, message: 'Starting restore…' },
       });
+      window.sessionStorage.setItem(storageKey, JSON.stringify({ operationId: response.operationId, kind: 'restore' }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const cancelOperation = async (): Promise<void> => {
+    if (!operation) return;
+    try {
+      const result = await api.cancelBackup(operation.operationId);
+      if (!result.canceled) setError('This operation is no longer cancellable.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -205,6 +273,9 @@ export default function BackupsPage({ server }: BackupsPageProps): React.JSX.Ele
           </div>
           <div className="dash-row">
             <span className="muted">{operation.progress.message}</span>
+            <button type="button" className="btn btn-sm" onClick={() => void cancelOperation()}>
+              Cancel
+            </button>
           </div>
         </div>
       )}

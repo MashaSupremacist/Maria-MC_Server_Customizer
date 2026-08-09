@@ -29,6 +29,7 @@ import type {
   LogLine,
   ModpackImportRequest,
   ModpackImportResult,
+  OperationStatus,
   PackInspection,
   PackKind,
   PackListResponse,
@@ -62,6 +63,7 @@ const CHANNELS = {
   windowToggleMaximize: 'window:toggle-maximize',
   windowClose: 'window:close',
   backendInfo: 'backend:info',
+  operationStatus: 'operations:status',
   selectServerLibrary: 'dialog:select-server-library',
   getSettings: 'settings:get',
   setSetting: 'settings:set',
@@ -111,6 +113,7 @@ const CHANNELS = {
   createBackup: 'backups:create',
   deleteBackup: 'backups:delete',
   restoreBackup: 'backups:restore',
+  cancelBackup: 'backups:cancel',
   getPlayitSettings: 'playit:settings:get',
   updatePlayitSettings: 'playit:settings:update',
   detectPlayit: 'playit:detect',
@@ -163,6 +166,8 @@ const api = {
 
   getBackendInfo: (): Promise<BackendInfo> =>
     ipcRenderer.invoke(CHANNELS.backendInfo),
+  getOperationStatus: (operationId: string): Promise<OperationStatus | null> =>
+    ipcRenderer.invoke(CHANNELS.operationStatus, operationId),
   selectServerLibrary: (): Promise<FolderSelectResult> =>
     ipcRenderer.invoke(CHANNELS.selectServerLibrary),
 
@@ -183,26 +188,26 @@ const api = {
     ipcRenderer.invoke(CHANNELS.createServerFromPack, request),
   updateServer: (id: string, input: UpdateServerInput): Promise<ServerRecord> =>
     ipcRenderer.invoke(CHANNELS.updateServer, id, input),
-  deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean }> =>
+  deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean; error?: string }> =>
     ipcRenderer.invoke(CHANNELS.deleteServer, id, deleteFolder),
 
   selectJavaExecutable: (): Promise<FolderSelectResult> =>
     ipcRenderer.invoke(CHANNELS.selectJavaExecutable),
   selectPlayitExecutable: (): Promise<FolderSelectResult> =>
     ipcRenderer.invoke(CHANNELS.selectPlayitExecutable),
-  openServerFolder: (folderPath: string): Promise<ShellOpenResult> =>
-    ipcRenderer.invoke(CHANNELS.openServerFolder, folderPath),
+  openServerFolder: (serverId: string): Promise<ShellOpenResult> =>
+    ipcRenderer.invoke(CHANNELS.openServerFolder, serverId),
 
   getServerStatus: (id: string): Promise<ServerStatus> =>
     ipcRenderer.invoke(CHANNELS.getServerStatus, id),
   startServer: (id: string): Promise<{ error: StartServerError | null }> =>
     ipcRenderer.invoke(CHANNELS.startServer, id),
-  stopServer: (): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke(CHANNELS.stopServer),
+  stopServer: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(CHANNELS.stopServer, id),
   restartServer: (id: string): Promise<{ error: StartServerError | null }> =>
     ipcRenderer.invoke(CHANNELS.restartServer, id),
-  forceKillServer: (): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke(CHANNELS.forceKillServer),
+  forceKillServer: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(CHANNELS.forceKillServer, id),
   sendServerCommand: (id: string, command: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(CHANNELS.sendServerCommand, id, command),
   getServerLogs: (id: string): Promise<LogLine[]> =>
@@ -278,6 +283,8 @@ const api = {
     ipcRenderer.invoke(CHANNELS.deleteBackup, backupId),
   restoreBackup: (request: RestoreBackupRequest): Promise<{ operationId: string; error?: string }> =>
     ipcRenderer.invoke(CHANNELS.restoreBackup, request),
+  cancelBackup: (operationId: string): Promise<{ canceled: boolean }> =>
+    ipcRenderer.invoke(CHANNELS.cancelBackup, operationId),
 
   getPlayitSettings: (): Promise<PlayitSettings> =>
     ipcRenderer.invoke(CHANNELS.getPlayitSettings),
@@ -288,8 +295,8 @@ const api = {
     ipcRenderer.invoke(CHANNELS.detectPlayit, playitPath),
   getPlayitStatus: (): Promise<PlayitStatus> =>
     ipcRenderer.invoke(CHANNELS.getPlayitStatus),
-  startPlayit: (playitPath: string): Promise<{ error: { code: string; message: string } | null }> =>
-    ipcRenderer.invoke(CHANNELS.startPlayit, playitPath),
+  startPlayit: (): Promise<{ error: { code: string; message: string } | null }> =>
+    ipcRenderer.invoke(CHANNELS.startPlayit),
   stopPlayit: (): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke(CHANNELS.stopPlayit),
   forceKillPlayit: (): Promise<{ ok: boolean }> =>
@@ -309,9 +316,8 @@ const api = {
     ipcRenderer.invoke(CHANNELS.listExtensions, serverId),
   uploadExtensions: (
     serverId: string,
-    files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
   ): Promise<{ ok: boolean; error?: string; added: string[] }> =>
-    ipcRenderer.invoke(CHANNELS.uploadExtensions, serverId, files),
+    ipcRenderer.invoke(CHANNELS.uploadExtensions, serverId),
   enableExtension: (serverId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke(CHANNELS.enableExtension, serverId, name),
   disableExtension: (serverId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
@@ -351,9 +357,8 @@ const api = {
   uploadPack: (
     id: string,
     kind: PackKind,
-    files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
   ): Promise<{ ok: boolean; error?: string; added: string[] }> =>
-    ipcRenderer.invoke(CHANNELS.uploadPack, id, kind, files),
+    ipcRenderer.invoke(CHANNELS.uploadPack, id, kind),
   deletePack: (id: string, kind: PackKind, name: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke(CHANNELS.deletePack, id, kind, name),
 };

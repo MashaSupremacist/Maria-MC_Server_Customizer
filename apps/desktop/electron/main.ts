@@ -1,8 +1,19 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { app, BrowserWindow, dialog, ipcMain as rawIpcMain, shell } from 'electron';
+import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { acquireSingleInstanceOwnership } from './single-instance';
+import { createBeforeQuitHandler } from './app-shutdown';
+import { BackendClient } from './backend-client';
+import { isCanonicalReleaseUrl } from './repository';
+import {
+  assertTrustedRendererUrl,
+  createTrustedRendererPolicy,
+  isAllowedExternalUrl,
+  isTrustedRendererUrl,
+} from './security';
 import { checkForUpdate } from './update-check';
 import {
   type AppSettings,
@@ -31,6 +42,7 @@ import {
   type LogLine,
   type ModpackImportRequest,
   type ModpackImportResult,
+  type OperationStatus,
   type CreateFromPackRequest,
   type CreateFromPackResult,
   type PackInspection,
@@ -55,11 +67,50 @@ import {
 } from '@msc/shared-types';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const rendererEntryPath = path.join(__dirname, '../dist/renderer/index.html');
+const rendererPolicy = createTrustedRendererPolicy(
+  pathToFileURL(rendererEntryPath).toString(),
+  process.env.VITE_DEV_SERVER_URL,
+);
+
+function assertTrustedIpcSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): void {
+  assertTrustedRendererUrl(event.senderFrame?.url ?? '', rendererPolicy);
+}
+
+// All privileged invoke/send registrations below pass through this one guard.
+const ipcMain = {
+  handle(
+    channel: string,
+    listener: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => any,
+  ): void {
+    rawIpcMain.handle(channel, (event, ...args) => {
+      assertTrustedIpcSender(event);
+      return listener(event, ...args);
+    });
+  },
+  on(
+    channel: string,
+    listener: (event: Electron.IpcMainEvent, ...args: any[]) => void,
+  ): void {
+    rawIpcMain.on(channel, (event, ...args) => {
+      if (!isTrustedRendererUrl(event.senderFrame?.url ?? '', rendererPolicy)) return;
+      listener(event, ...args);
+    });
+  },
+};
 
 let mainWindow: BrowserWindow | null = null;
-let backendProcess: ChildProcess | null = null;
-let backendInfo: BackendInfo | null = null;
-let backendStartPromise: Promise<BackendInfo> | null = null;
+
+// Claim the app-data/process boundary before registering IPC, creating a
+// window, or starting the backend. A losing process quits immediately.
+const ownsSingleInstance = acquireSingleInstanceOwnership({
+  requestLock: () => app.requestSingleInstanceLock(),
+  quit: () => app.quit(),
+  onSecondInstance: (listener) => {
+    app.on('second-instance', listener);
+  },
+  getWindow: () => mainWindow,
+});
 
 /**
  * Locate a real Node executable to run the backend child process.
@@ -100,12 +151,11 @@ function resolveBackendEntry(): string | null {
   return candidates.find((p) => fs.existsSync(p)) ?? null;
 }
 
-function spawnBackend(): Promise<void> {
-  return new Promise((resolve, reject) => {
+const backendClient = new BackendClient({
+  spawnBackend: () => {
     const entry = resolveBackendEntry();
     if (!entry) {
-      reject(new Error('Backend entry not found. Run `npm run build` first.'));
-      return;
+      throw new Error('Backend entry not found. Run `npm run build` first.');
     }
 
     const token = crypto.randomBytes(32).toString('hex');
@@ -113,96 +163,35 @@ function spawnBackend(): Promise<void> {
     fs.mkdirSync(dataDir, { recursive: true });
     const nodeExecutable = resolveNodeExecutable();
 
-    const child = spawn(nodeExecutable, [entry], {
-      env: {
-        ...process.env,
-        MSC_DATA_DIR: dataDir,
-        MSC_AUTH_TOKEN: token,
-        MSC_APP_VERSION: app.getVersion(),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
-
-    let settled = false;
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      const match = text.match(/MSC_READY (\d+)/);
-      if (match && !settled) {
-        settled = true;
-        backendProcess = child;
-        backendInfo = {
-          url: `http://127.0.0.1:${match[1]}`,
-          token,
-        };
-        resolve();
-      }
-    });
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      process.stderr.write(`[backend] ${chunk.toString()}`);
-    });
-
-    child.on('error', (err) => {
-      if (!settled) {
-        settled = true;
-        reject(err);
-      }
-    });
-
-    child.on('exit', (code) => {
-      if (!settled) {
-        settled = true;
-        reject(new Error(`Backend exited early with code ${code}`));
-      }
-      backendProcess = null;
-    });
-
-    // If it exits without ever signaling ready, fail after a short grace.
-    setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        reject(new Error('Backend did not signal readiness in time'));
-      }
-    }, 15000);
-  });
-}
+    return {
+      child: spawn(nodeExecutable, [entry], {
+        env: {
+          ...process.env,
+          MSC_DATA_DIR: dataDir,
+          MSC_AUTH_TOKEN: token,
+          MSC_APP_VERSION: app.getVersion(),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      }),
+      token,
+    };
+  },
+  onStderr: (text) => {
+    process.stderr.write(`[backend] ${text}`);
+  },
+});
 
 function ensureBackend(): Promise<BackendInfo> {
-  if (backendInfo) return Promise.resolve(backendInfo);
-  // Share a single spawn across concurrent callers (dashboard mount + IPC).
-  if (!backendStartPromise) {
-    backendStartPromise = spawnBackend().then((): BackendInfo => {
-      if (!backendInfo) throw new Error('Backend unavailable');
-      return backendInfo;
-    });
-  }
-  return backendStartPromise;
+  return backendClient.ensureBackend();
 }
 
-async function backendFetch(
+function backendFetch(
   method: string,
   route: string,
   body?: unknown,
 ): Promise<unknown> {
-  const info = await ensureBackend();
-  const headers: Record<string, string> = {
-    'x-msc-token': info.token,
-  };
-  if (body !== undefined) {
-    headers['content-type'] = 'application/json';
-  }
-  const response = await fetch(`${info.url}${route}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Backend ${method} ${route} failed (${response.status}): ${text}`);
-  }
-  return response.json() as Promise<unknown>;
+  return backendClient.fetch(method, route, body);
 }
 
 function createMainWindow(): void {
@@ -231,18 +220,30 @@ function createMainWindow(): void {
     mainWindow = null;
   });
 
-  // Open external links in the system browser, never inside the app window.
+  const denyUntrustedNavigation = (event: Electron.Event, url: string): void => {
+    if (!isTrustedRendererUrl(url, rendererPolicy)) event.preventDefault();
+  };
+  mainWindow.webContents.on('will-navigate', denyUntrustedNavigation);
+  mainWindow.webContents.on('will-redirect', denyUntrustedNavigation);
+
+  // Open only the small set of expected external links in the system browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://') || url.startsWith('http://')) {
+    if (isAllowedExternalUrl(url)) {
       void shell.openExternal(url);
     }
     return { action: 'deny' };
   });
 
+  const rendererSession = mainWindow.webContents.session;
+  rendererSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
+  });
+  rendererSession.setPermissionCheckHandler(() => false);
+
   if (isDev && process.env.VITE_DEV_SERVER_URL) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, '../dist/renderer/index.html'));
+    void mainWindow.loadFile(rendererEntryPath);
   }
 }
 
@@ -261,7 +262,7 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle(IpcChannels.openReleaseUrl, async (_event, url: string) => {
-    if (typeof url === 'string' && /^https:\/\/github\.com\//.test(url)) {
+    if (typeof url === 'string' && isCanonicalReleaseUrl(url)) {
       await shell.openExternal(url);
       return { ok: true };
     }
@@ -271,6 +272,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IpcChannels.backendInfo, async (): Promise<BackendInfo> => {
     return ensureBackend();
   });
+
+  ipcMain.handle(
+    IpcChannels.operationStatus,
+    async (_event, operationId: string): Promise<OperationStatus | null> => {
+      try {
+        return (await backendFetch(
+          'GET',
+          `/operations/${encodeURIComponent(operationId)}`,
+        )) as OperationStatus;
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('(404)')) return null;
+        throw error;
+      }
+    },
+  );
 
   ipcMain.handle(
     IpcChannels.selectServerLibrary,
@@ -388,7 +404,14 @@ function registerIpcHandlers(): void {
       if (result.canceled || result.filePaths.length === 0) {
         return { path: null, canceled: true };
       }
-      return { path: result.filePaths[0], canceled: false };
+      const selectedPath = path.resolve(result.filePaths[0]);
+      const extension = path.extname(selectedPath).toLowerCase();
+      const selectedStat = await fs.promises.lstat(selectedPath);
+      if (!selectedStat.isFile() || !['.exe', '.cmd', '.bat'].includes(extension)) {
+        throw new Error('The selected Playit path is not a supported executable file');
+      }
+      await backendFetch('PUT', '/playit/settings', { playitPath: selectedPath });
+      return { path: selectedPath, canceled: false };
     },
   );
 
@@ -414,12 +437,27 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IpcChannels.openServerFolder,
-    async (_event, folderPath: string): Promise<ShellOpenResult> => {
+    async (_event, serverId: string): Promise<ShellOpenResult> => {
       try {
-        if (!folderPath || !fs.existsSync(folderPath)) {
-          return { ok: false, error: `Folder not found: ${folderPath}` };
+        if (typeof serverId !== 'string' || serverId.length === 0) {
+          return { ok: false, error: 'A registered server ID is required' };
         }
-        const error = await shell.openPath(folderPath);
+        const servers = (await backendFetch('GET', '/servers')) as ServerRecord[];
+        const server = servers.find((record) => record.id === serverId);
+        if (!server) {
+          return { ok: false, error: 'Registered server not found' };
+        }
+        const storedPath = path.resolve(server.folderPath);
+        const registeredStat = await fs.promises.lstat(storedPath);
+        if (!registeredStat.isDirectory()) {
+          return { ok: false, error: 'Registered server path is not a directory' };
+        }
+        const canonicalPath = await fs.promises.realpath(storedPath);
+        const canonicalStat = await fs.promises.lstat(canonicalPath);
+        if (!canonicalStat.isDirectory()) {
+          return { ok: false, error: 'Canonical server path is not a directory' };
+        }
+        const error = await shell.openPath(canonicalPath);
         return error ? { ok: false, error } : { ok: true };
       } catch (err) {
         return {
@@ -448,15 +486,15 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IpcChannels.stopServer,
-    async (): Promise<{ ok: boolean }> => {
-      return (await backendFetch('POST', '/process/stop')) as { ok: boolean };
+    async (_event, id: string): Promise<{ ok: boolean }> => {
+      return (await backendFetch('POST', '/process/stop', { serverId: id })) as { ok: boolean };
     },
   );
 
   ipcMain.handle(
     IpcChannels.forceKillServer,
-    async (): Promise<{ ok: boolean }> => {
-      return (await backendFetch('POST', '/process/kill')) as { ok: boolean };
+    async (_event, id: string): Promise<{ ok: boolean }> => {
+      return (await backendFetch('POST', '/process/kill', { serverId: id })) as { ok: boolean };
     },
   );
 
@@ -588,6 +626,13 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.handle(
+    IpcChannels.cancelBackup,
+    async (_event, operationId: string): Promise<{ canceled: boolean }> => {
+      return (await backendFetch('POST', '/backups/cancel', { operationId })) as { canceled: boolean };
+    },
+  );
+
+  ipcMain.handle(
     IpcChannels.getPlayitSettings,
     async (): Promise<PlayitSettings> => {
       return (await backendFetch('GET', '/playit/settings')) as PlayitSettings;
@@ -600,6 +645,12 @@ function registerIpcHandlers(): void {
       _event,
       patch: Partial<Pick<PlayitSettings, 'playitPath' | 'playitPublicAddress'>>,
     ): Promise<PlayitSettings> => {
+      if (patch.playitPath !== undefined && patch.playitPath !== null) {
+        const current = (await backendFetch('GET', '/playit/settings')) as PlayitSettings;
+        if (path.resolve(patch.playitPath) !== current.playitPath) {
+          throw new Error('Playit executable changes must come from the native file picker');
+        }
+      }
       return (await backendFetch('PUT', '/playit/settings', patch)) as PlayitSettings;
     },
   );
@@ -622,12 +673,13 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IpcChannels.startPlayit,
-    async (
-      _event,
-      playitPath: string,
-    ): Promise<{ error: { code: string; message: string } | null }> => {
+    async (): Promise<{ error: { code: string; message: string } | null }> => {
+      const settings = (await backendFetch('GET', '/playit/settings')) as PlayitSettings;
+      if (!settings.playitPath) {
+        return { error: { code: 'not-configured', message: 'No Playit executable selected' } };
+      }
       return (await backendFetch('POST', '/playit/start', {
-        playitPath,
+        playitPath: settings.playitPath,
       })) as { error: { code: string; message: string } | null };
     },
   );
@@ -708,12 +760,20 @@ function registerIpcHandlers(): void {
     async (
       _event,
       serverId: string,
-      files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
     ): Promise<{ ok: boolean; error?: string; added: string[] }> => {
+      const options = {
+        title: 'Select mods or plugins',
+        properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
+        filters: [{ name: 'Java archives', extensions: ['jar'] }],
+      };
+      const selection = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length === 0) return { ok: true, added: [] };
       return (await backendFetch(
         'POST',
         `/servers/${encodeURIComponent(serverId)}/extensions/upload`,
-        { files },
+        { filePaths: selection.filePaths },
       )) as { ok: boolean; error?: string; added: string[] };
     },
   );
@@ -901,12 +961,20 @@ function registerIpcHandlers(): void {
       _event,
       id: string,
       kind: PackKind,
-      files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
     ): Promise<{ ok: boolean; error?: string; added: string[] }> => {
+      const options = {
+        title: `Select ${kind} pack`,
+        properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
+        filters: [{ name: 'Bedrock packs', extensions: ['mcpack', 'zip', 'mcworld', 'mcaddon'] }],
+      };
+      const selection = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length === 0) return { ok: true, added: [] };
       return (await backendFetch(
         'POST',
         `/servers/${encodeURIComponent(id)}/packs/${encodeURIComponent(kind)}/upload`,
-        { files },
+        { filePaths: selection.filePaths },
       )) as { ok: boolean; error?: string; added: string[] };
     },
   );
@@ -932,7 +1000,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     IpcChannels.updateGamerule,
     async (_event, id: string, key: string, value: string): Promise<CommandResult> => {
-      return (await backendFetch('POST', `/servers/${id}/gamerules`, {
+      return (await backendFetch('PUT', `/servers/${id}/gamerules`, {
         key,
         value,
       })) as CommandResult;
@@ -1147,32 +1215,34 @@ function registerIpcHandlers(): void {
   });
 }
 
-app.whenReady().then(async () => {
-  registerIpcHandlers();
-  createMainWindow();
+if (ownsSingleInstance) {
+  app.whenReady().then(async () => {
+    registerIpcHandlers();
+    createMainWindow();
 
-  // Start the backend alongside the window; failures are logged but do not
-  // prevent the shell from opening (the UI surfaces backend status).
-  // Use ensureBackend so the eager start shares the same promise as IPC calls.
-  void ensureBackend().catch((err: unknown) => {
-    console.error('Failed to start backend:', err);
+    // Start the backend alongside the window; failures are logged but do not
+    // prevent the shell from opening (the UI surfaces backend status).
+    // Use ensureBackend so the eager start shares the same promise as IPC calls.
+    void ensureBackend().catch((err: unknown) => {
+      console.error('Failed to start backend:', err);
+    });
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createMainWindow();
+      }
+    });
   });
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
+  app.on('before-quit', createBeforeQuitHandler({
+    shutdownBackend: () => backendClient.shutdown(),
+    quit: () => app.quit(),
+    onError: (error) => console.error('Failed to stop backend cleanly:', error),
+  }));
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
     }
   });
-});
-
-app.on('before-quit', () => {
-  if (backendProcess && !backendProcess.killed) {
-    backendProcess.kill();
-  }
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+}

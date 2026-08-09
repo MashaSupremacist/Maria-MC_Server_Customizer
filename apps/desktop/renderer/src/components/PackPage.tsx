@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { PackEntry, PackKind, ServerRecord } from '@msc/shared-types';
 import { api } from '../lib/api';
 
@@ -14,7 +14,6 @@ export default function PackPage({ server, kind }: PackPageProps): React.JSX.Ele
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<PackEntry | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const isBehavior = kind === 'behavior';
   const title = isBehavior ? 'Behavior Packs' : 'Resource Packs';
@@ -36,22 +35,12 @@ export default function PackPage({ server, kind }: PackPageProps): React.JSX.Ele
     void refresh();
   }, [refresh]);
 
-  const onFileChosen = async (file: File | undefined): Promise<void> => {
-    if (!file) return;
+  const onFileChosen = async (): Promise<void> => {
     setNotice(null);
     setLoadError(null);
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += 1) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const contentBase64 = btoa(binary);
     setBusy(true);
     try {
-      const result = await api.uploadPack(server.id, kind, [
-        { name: file.name, contentBase64, sizeBytes: file.size },
-      ]);
+      const result = await api.uploadPack(server.id, kind);
       if (!result.ok) {
         setLoadError(result.error ?? 'Upload failed');
       } else {
@@ -62,7 +51,6 @@ export default function PackPage({ server, kind }: PackPageProps): React.JSX.Ele
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
-      if (fileRef.current) fileRef.current.value = '';
     }
   };
 
@@ -114,13 +102,14 @@ export default function PackPage({ server, kind }: PackPageProps): React.JSX.Ele
           server first.
         </p>
         <div className="dash-row">
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".mcpack,.zip,.mcworld,.mcaddon"
+          <button
+            type="button"
+            className="btn btn-sm"
             disabled={busy}
-            onChange={(e) => void onFileChosen(e.target.files?.[0])}
-          />
+            onClick={() => void onFileChosen()}
+          >
+            {busy ? 'Importing…' : 'Select Pack Files'}
+          </button>
         </div>
       </div>
 

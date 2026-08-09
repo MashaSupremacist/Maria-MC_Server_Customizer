@@ -74,18 +74,18 @@ export const api = {
     window.msc.createServerFromPack(request),
   updateServer: (id: string, input: UpdateServerInput): Promise<ServerRecord> =>
     window.msc.updateServer(id, input),
-  deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean }> =>
+  deleteServer: (id: string, deleteFolder = false): Promise<{ deleted: boolean; folderDeleted?: boolean; error?: string }> =>
     window.msc.deleteServer(id, deleteFolder),
 
-  openServerFolder: (folderPath: string) => window.msc.openServerFolder(folderPath),
+  openServerFolder: (serverId: string) => window.msc.openServerFolder(serverId),
   getServerStatus: (id: string): Promise<ServerStatus> =>
     window.msc.getServerStatus(id),
   startServer: (id: string): Promise<{ error: StartServerError | null }> =>
     window.msc.startServer(id),
-  stopServer: (): Promise<{ ok: boolean }> => window.msc.stopServer(),
+  stopServer: (id: string): Promise<{ ok: boolean }> => window.msc.stopServer(id),
   restartServer: (id: string): Promise<{ error: StartServerError | null }> =>
     window.msc.restartServer(id),
-  forceKillServer: (): Promise<{ ok: boolean }> => window.msc.forceKillServer(),
+  forceKillServer: (id: string): Promise<{ ok: boolean }> => window.msc.forceKillServer(id),
   sendServerCommand: (id: string, command: string): Promise<{ ok: boolean }> =>
     window.msc.sendServerCommand(id, command),
   getServerLogs: (id: string): Promise<LogLine[]> => window.msc.getServerLogs(id),
@@ -162,6 +162,9 @@ export const api = {
     window.msc.deleteBackup(backupId),
   restoreBackup: (request: RestoreBackupRequest): Promise<{ operationId: string; error?: string }> =>
     window.msc.restoreBackup(request),
+  cancelBackup: (operationId: string): Promise<{ canceled: boolean }> =>
+    window.msc.cancelBackup(operationId),
+  getOperationStatus: (operationId: string) => window.msc.getOperationStatus(operationId),
 
   getPlayitSettings: (): Promise<PlayitSettings> => window.msc.getPlayitSettings(),
   updatePlayitSettings: (
@@ -170,8 +173,8 @@ export const api = {
   detectPlayit: (playitPath: string | null): Promise<{ detected: boolean }> =>
     window.msc.detectPlayit(playitPath),
   getPlayitStatus: (): Promise<PlayitStatus> => window.msc.getPlayitStatus(),
-  startPlayit: (playitPath: string): Promise<{ error: { code: string; message: string } | null }> =>
-    window.msc.startPlayit(playitPath),
+  startPlayit: (): Promise<{ error: { code: string; message: string } | null }> =>
+    window.msc.startPlayit(),
   stopPlayit: (): Promise<{ ok: boolean }> => window.msc.stopPlayit(),
   forceKillPlayit: (): Promise<{ ok: boolean }> => window.msc.forceKillPlayit(),
 
@@ -188,9 +191,8 @@ export const api = {
     window.msc.listExtensions(serverId),
   uploadExtensions: (
     serverId: string,
-    files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
   ): Promise<{ ok: boolean; error?: string; added: string[] }> =>
-    window.msc.uploadExtensions(serverId, files),
+    window.msc.uploadExtensions(serverId),
   enableExtension: (serverId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
     window.msc.enableExtension(serverId, name),
   disableExtension: (serverId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
@@ -228,9 +230,8 @@ export const api = {
   uploadPack: (
     id: string,
     kind: PackKind,
-    files: Array<{ name: string; contentBase64: string; sizeBytes: number }>,
   ): Promise<{ ok: boolean; error?: string; added: string[] }> =>
-    window.msc.uploadPack(id, kind, files),
+    window.msc.uploadPack(id, kind),
   deletePack: (id: string, kind: PackKind, name: string): Promise<{ ok: boolean; error?: string }> =>
     window.msc.deletePack(id, kind, name),
 };

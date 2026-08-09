@@ -24,6 +24,7 @@ export default function SettingsPage({ server }: SettingsPageProps): React.JSX.E
     setDoc(null);
     setErrors({});
     setNotice(null);
+    setLoadError(null);
     const isBedrock = server.edition === 'bedrock';
     (isBedrock ? api.getBedrockProperties(server.id) : api.getServerProperties(server.id))
       .then((document) => {
@@ -35,6 +36,7 @@ export default function SettingsPage({ server }: SettingsPageProps): React.JSX.E
         }
         setDrafts(initial);
         setRawText(document.rawText);
+        setLoadError(null);
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -71,6 +73,7 @@ export default function SettingsPage({ server }: SettingsPageProps): React.JSX.E
       setErrors(result.validation.errors);
       if (result.validation.ok) {
         setDoc(result.document);
+        setLoadError(null);
         setNotice(
           result.document.lastBackupPath
             ? `Saved. A backup was written to ${result.document.lastBackupPath}`
@@ -193,7 +196,7 @@ export default function SettingsPage({ server }: SettingsPageProps): React.JSX.E
               setNotice(null);
             }}
           >
-            {rawMode ? 'Friendly Editor' : 'Advanced (raw)'}
+            {rawMode ? 'Friendly Editor' : 'Additional Properties'}
           </button>
         </div>
       </header>
@@ -202,50 +205,17 @@ export default function SettingsPage({ server }: SettingsPageProps): React.JSX.E
 
       {rawMode ? (
         <div className="panel">
-          <h2 className="panel-title">Raw server.properties</h2>
+          <h2 className="panel-title">Preserved additional properties</h2>
           <p className="muted">
-            Edit the file directly. Comments and unknown keys are preserved on
-            save; known fields are still validated.
+            These unknown properties are preserved when friendly settings are saved.
+            Edit the file outside the app if you need to change them.
           </p>
           <textarea
             className="input raw-editor"
             value={rawText}
-            onChange={(e) => setRawText(e.target.value)}
+            readOnly
             spellCheck={false}
           />
-          <div className="dash-row">
-            <button
-              type="button"
-              className="btn"
-              onClick={async () => {
-                // Parse raw text into values for the schema fields.
-                try {
-                  const values: Record<string, string> = {};
-                  for (const line of rawText.split(/\r?\n/)) {
-                    const trimmed = line.trim();
-                    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) continue;
-                    const eq = trimmed.indexOf('=');
-                    const colon = trimmed.indexOf(':');
-                    const sep = eq >= 0 && (colon < 0 || eq < colon) ? eq : colon;
-                    if (sep < 0) continue;
-                    values[trimmed.slice(0, sep).trim()] = trimmed.slice(sep + 1).trim();
-                  }
-                  const result = server.edition === 'bedrock'
-                    ? await api.updateBedrockProperties(server.id, { values })
-                    : await api.updateServerProperties(server.id, { values });
-                  setErrors(result.validation.errors);
-                  if (result.validation.ok) {
-                    setDoc(result.document);
-                    setNotice('Saved from raw editor.');
-                  }
-                } catch (err) {
-                  setLoadError(err instanceof Error ? err.message : String(err));
-                }
-              }}
-            >
-              Save Raw
-            </button>
-          </div>
         </div>
       ) : (
         <div className="settings-list">

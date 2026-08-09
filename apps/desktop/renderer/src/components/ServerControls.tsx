@@ -130,7 +130,7 @@ export default function ServerControls({
         <button
           type="button"
           className="btn"
-          onClick={() => void api.openServerFolder(server.folderPath)}
+          onClick={() => void api.openServerFolder(server.id)}
         >
           Open Folder
         </button>
