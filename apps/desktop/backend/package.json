@@ -1,11 +1,12 @@
 {
   "name": "@msc/backend",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Local Fastify backend for the Minecraft Server Customizer.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
@@ -21,16 +22,15 @@
     "yazl": "^3.3.1"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.7",
     "@types/pidusage": "^2.0.5",
     "@types/ws": "^8.5.13",
+    "@types/yauzl": "^3.4.0",
     "@types/yazl": "^3.3.1",
-    "electron-builder": "^26.0.12",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
-    "vitest": "^2.1.8",
+    "vitest": "^4.1.10",
     "ws": "^8.18.0"
   }
 }

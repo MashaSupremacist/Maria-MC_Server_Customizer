@@ -1,6 +1,6 @@
 {
   "name": "@msc/desktop",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Minecraft Server Customizer desktop application (Electron + React + Vite).",
   "main": "dist-electron/main.js",
@@ -12,11 +12,14 @@
     "build:renderer": "vite build --config vite.renderer.config.ts",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build:shared-types": "tsc -p ../../packages/shared-types/tsconfig.json",
-    "build:backend": "tsc -p backend/tsconfig.json",
+    "build:backend": "npm run build -w @msc/backend",
     "typecheck": "npm run build:shared-types && npm run typecheck:renderer && npm run typecheck:electron && npm run typecheck:backend",
     "typecheck:renderer": "tsc -p tsconfig.json --noEmit",
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
     "typecheck:backend": "tsc -p backend/tsconfig.json --noEmit",
+    "test:electron": "vitest run --config vitest.desktop.config.ts",
+    "test:renderer": "vitest run --config vitest.renderer.config.ts",
+    "test": "npm run test:electron && npm run test:renderer",
     "start": "electron .",
     "prepare:backend-deps": "node ../../scripts/prepare-backend-deps.mjs",
     "predist": "npm run prepare:backend-deps",
@@ -25,16 +28,21 @@
     "dist:dir": "npm run build && electron-builder --dir"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.3",
     "@types/node": "^22.10.7",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
     "cross-env": "^7.0.3",
-    "electron": "33.4.11",
-    "electron-builder": "^26.0.12",
+    "electron": "43.3.0",
+    "electron-builder": "^26.15.3",
+    "jsdom": "^30.0.1",
     "typescript": "^5.7.3",
-    "vite": "^6.0.11"
+    "vite": "^6.0.11",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@msc/shared-types": "*",
@@ -57,7 +65,15 @@
     "extraResources": [
       {
         "from": "backend/dist",
-        "to": "backend/dist"
+        "to": "backend/dist",
+        "filter": [
+          "**/*",
+          "!**/__tests__/**",
+          "!**/*.test.*",
+          "!**/*.spec.*",
+          "!**/*.map",
+          "!**/*.d.ts"
+        ]
       },
       {
         "from": "backend/node_modules",
@@ -90,7 +106,7 @@
         }
       ],
       "icon": "build/icon.ico",
-      "signAndEditExecutable": false
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,
@@ -101,8 +117,8 @@
       "deleteAppDataOnUninstall": false
     },
     "portable": {
-      "artifactName": "${productName}-Portable-${version}.${ext}"
+      "artifactName": "Minecraft.Server.Customizer-Portable-${version}.${ext}"
     },
-    "artifactName": "${productName}-Setup-${version}.${ext}"
+    "artifactName": "Minecraft.Server.Customizer-Setup-${version}.${ext}"
   }
 }

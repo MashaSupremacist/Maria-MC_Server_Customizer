@@ -2,7 +2,7 @@
  * make-portable-zip.mjs
  *
  * Zips the unpacked app (release/win-unpacked) into a portable ZIP named
- * "Minecraft Server Customizer-Portable-<version>.zip", matching the release
+ * "Minecraft.Server.Customizer-Portable-<version>.zip", matching the release
  * naming in the plan. Uses the system tar (Windows 10+ ships bsdtar) to avoid
  * the Compress-Archive CLI dependency in scripts.
  */
@@ -20,7 +20,7 @@ const pkg = JSON.parse(
   fs.readFileSync(path.join(root, 'apps/desktop/package.json'), 'utf8'),
 );
 const version = pkg.version;
-const zipName = `Minecraft Server Customizer-Portable-${version}.zip`;
+const zipName = `Minecraft.Server.Customizer-Portable-${version}.zip`;
 const zipPath = path.join(releaseDir, zipName);
 
 if (!fs.existsSync(unpackedDir)) {

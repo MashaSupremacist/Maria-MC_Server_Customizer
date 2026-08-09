@@ -6,22 +6,50 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    name: Build Windows Installer + Portable
+    name: Build and verify Windows artifacts
     runs-on: windows-latest
+    timeout-minutes: 45
     permissions:
-      contents: write
+      contents: read
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: npm
+
+      - name: Validate tag and workspace versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tagVersion = '${{ github.ref_name }}' -replace '^v', ''
+          $manifests = @(
+            'package.json',
+            'apps/desktop/package.json',
+            'apps/desktop/backend/package.json',
+            'packages/shared-types/package.json'
+          )
+          foreach ($manifest in $manifests) {
+            $version = (Get-Content -Raw $manifest | ConvertFrom-Json).version
+            if ($version -ne $tagVersion) {
+              throw "$manifest version $version does not match tag $tagVersion"
+            }
+          }
+          $lockVersion = (Get-Content -Raw package-lock.json | ConvertFrom-Json).version
+          if ($lockVersion -ne $tagVersion) {
+            throw "package-lock.json version $lockVersion does not match tag $tagVersion"
+          }
 
       - name: Install dependencies
         run: |
@@ -31,22 +59,27 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test (backend)
+      - name: Test
         run: npm test
 
       - name: Build
         run: npm run build
 
+      - name: Audit dependencies
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit --audit-level=high
+
       - name: Stage bundled Node for the backend
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "apps/desktop/resources/bin" | Out-Null
-          Copy-Item "$env:ProgramFiles\nodejs\node.exe" "apps/desktop/resources/bin/node.exe" -Force
+          New-Item -ItemType Directory -Force -Path 'apps/desktop/resources/bin' | Out-Null
+          Copy-Item "$env:ProgramFiles\nodejs\node.exe" 'apps/desktop/resources/bin/node.exe' -Force
 
-      - name: Prepare backend deps for packaging
+      - name: Prepare backend dependencies
         run: node scripts/prepare-backend-deps.mjs
 
-      - name: Package (electron-builder)
+      - name: Package
         working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -55,22 +88,68 @@ jobs:
       - name: Create portable ZIP
         run: node scripts/make-portable-zip.mjs
 
+      - name: Verify package inventory and backend health
+        shell: pwsh
+        run: '& .\scripts\verify-package.ps1'
+
       - name: Compute checksums
-        shell: bash
+        shell: pwsh
         run: |
-          cd release
-          sha256sum Minecraft\ Server\ Customizer-Setup-*.exe \
-            Minecraft\ Server\ Customizer-Portable-*.exe \
-            Minecraft\ Server\ Customizer-Portable-*.zip > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          $files = Get-ChildItem release -File | Where-Object Name -Match '^Minecraft\.Server\.Customizer-(Setup|Portable)-.+\.(exe|zip)$'
+          if ($files.Count -ne 3) { throw "Expected exactly 3 release artifacts, found $($files.Count)" }
+          $lines = foreach ($file in $files | Sort-Object Name) {
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          Get-Content release/SHA256SUMS.txt
+
+      - name: Generate dependency SBOM
+        shell: cmd
+        run: npm sbom --omit=dev --sbom-format cyclonedx > release\Minecraft.Server.Customizer-SBOM.cdx.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            release/Minecraft.Server.Customizer-Setup-*.exe
+            release/Minecraft.Server.Customizer-Portable-*.exe
+            release/Minecraft.Server.Customizer-Portable-*.zip
+
+      - name: Upload verified artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-release
+          path: |
+            release/Minecraft.Server.Customizer-Setup-*.exe
+            release/Minecraft.Server.Customizer-Portable-*.exe
+            release/Minecraft.Server.Customizer-Portable-*.zip
+            release/SHA256SUMS.txt
+            release/Minecraft.Server.Customizer-SBOM.cdx.json
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-release
+          path: release
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            release/Minecraft Server Customizer-Setup-*.exe
-            release/Minecraft Server Customizer-Portable-*.exe
-            release/Minecraft Server Customizer-Portable-*.zip
+            release/Minecraft.Server.Customizer-Setup-*.exe
+            release/Minecraft.Server.Customizer-Portable-*.exe
+            release/Minecraft.Server.Customizer-Portable-*.zip
             release/SHA256SUMS.txt
+            release/Minecraft.Server.Customizer-SBOM.cdx.json
           generate_release_notes: true
