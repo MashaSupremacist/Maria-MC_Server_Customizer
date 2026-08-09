@@ -93,4 +93,24 @@ describe('ServerManagerService Java fallback', () => {
     expect(resolveJava).not.toHaveBeenCalled();
     expect(validateJava).toHaveBeenCalledWith('1.20.4', 'C:\\configured\\java.exe');
   });
+
+  it('resolves and validates Java for a standard Forge run.bat that is launched directly', async () => {
+    const { record, db } = setup(null);
+    const argsFolder = path.join(tempDir, 'libraries', 'net', 'minecraftforge', 'forge', '1.20.4-49.0.31');
+    fs.mkdirSync(argsFolder, { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'user_jvm_args.txt'), '# generated\n');
+    fs.writeFileSync(path.join(argsFolder, 'win_args.txt'), '-Dforge=true\n');
+    fs.writeFileSync(
+      path.join(tempDir, 'run.bat'),
+      '@echo off\r\njava @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.20.4-49.0.31/win_args.txt %*\r\n',
+    );
+    const resolveJava = vi.fn(async () => 'C:\\runtimes\\java-17\\bin\\java.exe');
+    const validationError: StartServerError = { code: 'incompatible-java', message: 'stop after validation' };
+    const validateJava = vi.fn(async () => validationError);
+    const manager = new ServerManagerService(db, () => undefined, validateJava, resolveJava);
+
+    await expect(manager.start(record.id)).resolves.toEqual(validationError);
+    expect(resolveJava).toHaveBeenCalledWith('1.20.4');
+    expect(validateJava).toHaveBeenCalledWith('1.20.4', 'C:\\runtimes\\java-17\\bin\\java.exe');
+  });
 });

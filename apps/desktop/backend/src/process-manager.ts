@@ -5,10 +5,14 @@ import {
 } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import pidusage from 'pidusage';
 import { StringDecoder } from 'node:string_decoder';
 import { buildChildProcessEnvironment } from './child-process-env';
+import {
+  inspectBatchLauncherForHeadlessMode,
+  resolveModernForgeLaunch,
+} from './headless-launcher';
 import { findBatchLauncher } from './launch-target';
+import { ProcessTreeSampler } from './process-tree-sampler';
 import type {
   LogLine,
   ServerFlavor,
@@ -48,6 +52,18 @@ export type ProcessSpawner = (
 
 const LOG_LIMIT = 500;
 const STATS_INTERVAL_MS = 2000;
+
+function emptyStats(): ServerStats {
+  return {
+    cpuPercent: null,
+    memoryMb: null,
+    processIds: [],
+    sampledAt: null,
+    isStale: false,
+    playerCount: null,
+    onlinePlayers: [],
+  };
+}
 
 /** Find the server jar in a server folder, flavor-aware. */
 export function findServerJar(
@@ -130,11 +146,18 @@ export class ProcessManager {
   private logs: LogLine[] = [];
   private port: number | null = null;
   private statsTimer: NodeJS.Timeout | null = null;
-  private stats: ServerStats = { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] };
+  private stats: ServerStats = emptyStats();
+  private statsSampling = false;
+  private readonly sampler: Pick<ProcessTreeSampler, 'sample' | 'reset'>;
 
-  constructor(events: ProcessEvents, spawnProcess: ProcessSpawner = spawn) {
+  constructor(
+    events: ProcessEvents,
+    spawnProcess: ProcessSpawner = spawn,
+    sampler: Pick<ProcessTreeSampler, 'sample' | 'reset'> = new ProcessTreeSampler(),
+  ) {
     this.events = events;
     this.spawnProcess = spawnProcess;
+    this.sampler = sampler;
   }
 
   get runningServerId(): string | null {
@@ -177,7 +200,10 @@ export class ProcessManager {
       return { code: 'folder-not-found', message: `Folder not found: ${config.folderPath}` };
     }
     const edition = config.edition ?? 'java';
-    const executable = findServerExecutable(
+    const modernForgeLaunch = edition === 'java'
+      ? resolveModernForgeLaunch(config.folderPath)
+      : null;
+    const executable = modernForgeLaunch?.launcherPath ?? findServerExecutable(
       config.folderPath,
       edition,
       config.flavor ?? 'vanilla',
@@ -194,7 +220,7 @@ export class ProcessManager {
         message: 'No server.jar, single .jar, or start.bat launcher found in the server folder',
       };
     }
-    const isBatchLauncher = /\.(bat|cmd)$/i.test(executable);
+    const isBatchLauncher = !modernForgeLaunch && /\.(bat|cmd)$/i.test(executable);
     if (edition === 'java' && !isBatchLauncher && !fs.existsSync(config.javaPath)) {
       return {
         code: 'missing-java',
@@ -217,7 +243,8 @@ export class ProcessManager {
     this.exitCode = null;
     this.startedAt = Date.now();
     this.port = config.port;
-    this.stats = { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] };
+    this.stats = emptyStats();
+    this.sampler.reset();
     this.setState('starting');
 
     let launch: { command: string; args: string[] };
@@ -227,12 +254,26 @@ export class ProcessManager {
       isCmdWrapper = /\.(cmd|bat)$/i.test(executable);
       this.pushLog(`Starting "${config.name}"…`);
       this.pushLog(`Command: ${executable}`);
+    } else if (modernForgeLaunch) {
+      // Forge's generated run.bat is only a Java response-file wrapper.
+      // Execute the JVM directly so it is fully hidden, receives `nogui`,
+      // streams output into this app, and is the process we sample.
+      launch = { command: config.javaPath, args: modernForgeLaunch.args };
+      this.pushLog(`Starting "${config.name}" with Forge argument files in headless mode...`);
+      this.pushLog(`Command: ${config.javaPath} ${launch.args.join(' ')}`);
     } else if (isBatchLauncher) {
       // Server pack with a batch launcher (start.bat) instead of a bare jar:
       // the script owns the full java invocation, so run it as-is via cmd /c.
       // The configured java/RAM are not applied — the pack author's script
       // decides. Its stdout/stderr still stream into the console and stats.
-      launch = { command: executable, args: [] };
+      const batchPlan = inspectBatchLauncherForHeadlessMode(executable);
+      if (batchPlan.kind === 'unsupported') {
+        return {
+          code: 'unsupported-launcher',
+          message: `Cannot start "${config.name}" headlessly: ${batchPlan.message}`,
+        };
+      }
+      launch = { command: executable, args: batchPlan.appendNogui ? ['nogui'] : [] };
       isCmdWrapper = true;
       this.pushLog(`Starting "${config.name}" via batch launcher…`);
       this.pushLog(`Command: ${executable}`);
@@ -267,7 +308,7 @@ export class ProcessManager {
           ? path.basename(launch.command)
           : launch.command;
       command = process.env.ComSpec ?? 'cmd.exe';
-      args = ['/d', '/s', '/c', launcherName];
+      args = ['/d', '/s', '/c', launcherName, ...launch.args];
       // Batch launchers (start.bat / run.bat) call bare `java`, which resolves
       // via PATH. Put the configured java's bin folder first so the pack runs
       // with the runtime the user selected, not whatever is on the system PATH.
@@ -299,7 +340,7 @@ export class ProcessManager {
         this.pushLog(`Server stdin closed: ${error.message}`, 'warn');
       }
     });
-    this.startStatsTimer(child.pid);
+    this.startStatsTimer(child.pid, child);
 
     const handleStdoutLine = (line: string): void => {
       if (!line) return;
@@ -491,7 +532,7 @@ export class ProcessManager {
       logs: running ? this.logs : [],
       stats: running
         ? this.stats
-        : { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] },
+        : emptyStats(),
       address: running && this.port ? `127.0.0.1:${this.port}` : null,
     };
   }
@@ -515,24 +556,39 @@ export class ProcessManager {
     await waitForChildExit(child, forceTimeoutMs);
   }
 
-  private startStatsTimer(pid: number | undefined): void {
+  private startStatsTimer(pid: number | undefined, child: ChildProcess): void {
     this.clearStatsTimer();
     if (!pid) return;
-    this.statsTimer = setInterval(() => {
-      void pidusage(pid).then((usage) => {
-        // Guard against the process having exited.
-        if (!this.child || this.child.pid !== pid) return;
+    const sample = (): void => {
+      if (this.statsSampling) return;
+      this.statsSampling = true;
+      void this.sampler.sample(pid).then((sampled) => {
+        // Guard against stale results from a process that has exited or was
+        // replaced while the OS query was running.
+        if (this.child !== child || this.child.pid !== pid) return;
         this.stats = {
           ...this.stats,
-          cpuPercent: round1(usage.cpu),
-          memoryMb: round1(usage.memory / (1024 * 1024)),
+          cpuPercent: sampled.cpuPercent,
+          memoryMb: sampled.memoryMb,
+          processIds: sampled.pids,
+          sampledAt: sampled.sampledAt,
+          isStale: false,
         };
         this.emitStats();
       }).catch(() => {
-        // process gone; stop sampling
-        this.clearStatsTimer();
+        // Sampling failures (for example a transient CIM timeout) are not a
+        // server exit. Keep the last reading visible but mark it stale and
+        // retry on the next interval.
+        if (this.child === child && this.child.pid === pid) {
+          this.stats = { ...this.stats, isStale: true };
+          this.emitStats();
+        }
+      }).finally(() => {
+        this.statsSampling = false;
       });
-    }, STATS_INTERVAL_MS);
+    };
+    sample();
+    this.statsTimer = setInterval(sample, STATS_INTERVAL_MS);
   }
 
   private clearStatsTimer(): void {
@@ -540,6 +596,7 @@ export class ProcessManager {
       clearInterval(this.statsTimer);
       this.statsTimer = null;
     }
+    this.statsSampling = false;
   }
 
   private emitStats(): void {
@@ -682,10 +739,6 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boole
     child.once('error', onClose);
     if (child.exitCode !== null || child.signalCode !== null) finish(true);
   });
-}
-
-function round1(value: number): number {
-  return Math.round(value * 10) / 10;
 }
 
 function classifyLine(line: string): LogLine['level'] {

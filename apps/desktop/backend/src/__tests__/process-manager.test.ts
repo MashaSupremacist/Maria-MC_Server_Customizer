@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -325,6 +325,61 @@ describe('ProcessManager', () => {
     await waitFor(() => manager.runningServerId === null, 5000);
   });
 
+  it('passes nogui into a compatible custom batch launcher', () => {
+    fs.writeFileSync(path.join(tempDir, 'start.bat'), '@echo off\r\njava -jar server.jar %*\r\n');
+    const fake = createFakeChildProcess();
+    let received: { command: string; args: readonly string[] } | null = null;
+    manager = new ProcessManager(
+      { onState: () => undefined, onLog: () => undefined, onStats: () => undefined },
+      (command, args) => {
+        received = { command, args };
+        return fake.child;
+      },
+    );
+
+    expect(manager.start(makeServerConfig({ javaPath: '', jvmArgs: [] }))).toBeNull();
+    expect(received).toMatchObject({ args: expect.arrayContaining(['start.bat', 'nogui']) });
+    fake.child.emit('close', 0, null);
+  });
+
+  it('rejects a custom batch launcher that cannot be guaranteed headless', () => {
+    fs.writeFileSync(path.join(tempDir, 'start.bat'), '@echo off\r\njava -jar server.jar\r\n');
+    const err = manager.start(makeServerConfig({ javaPath: '', jvmArgs: [] }));
+    expect(err).toMatchObject({ code: 'unsupported-launcher', message: expect.stringContaining('nogui') });
+  });
+
+  it('launches standard Forge response files directly through Java with nogui', () => {
+    const argsFolder = path.join(tempDir, 'libraries', 'net', 'minecraftforge', 'forge', '1.21.1-52.0.57');
+    fs.mkdirSync(argsFolder, { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'user_jvm_args.txt'), '# generated\n');
+    fs.writeFileSync(path.join(argsFolder, 'win_args.txt'), '-Dforge=true\n');
+    fs.writeFileSync(
+      path.join(tempDir, 'run.bat'),
+      '@echo off\r\njava @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.21.1-52.0.57/win_args.txt %*\r\n',
+    );
+    fs.writeFileSync(path.join(tempDir, 'eula.txt'), 'eula=true\n');
+    const fake = createFakeChildProcess();
+    let received: { command: string; args: readonly string[] } | null = null;
+    manager = new ProcessManager(
+      { onState: () => undefined, onLog: () => undefined, onStats: () => undefined },
+      (command, args) => {
+        received = { command, args };
+        return fake.child;
+      },
+    );
+
+    expect(manager.start(makeServerConfig({ javaPath: process.execPath, flavor: 'forge' }))).toBeNull();
+    expect(received).toEqual({
+      command: process.execPath,
+      args: [
+        '@user_jvm_args.txt',
+        '@libraries/net/minecraftforge/forge/1.21.1-52.0.57/win_args.txt',
+        'nogui',
+      ],
+    });
+    fake.child.emit('close', 0, null);
+  });
+
   it('launches a batch launcher whose folder path contains spaces', async () => {
     // Regression: paths like "C:\Servers\Minecraft Servers\CARP\start.bat"
     // were passed to cmd /c unquoted, so cmd split on the space and tried to
@@ -364,7 +419,7 @@ describe('ProcessManager', () => {
     fs.writeFileSync(
       path.join(tempDir, 'start.bat'),
       // The launcher calls bare `java` exactly like a real pack's run.bat.
-      '@echo off\r\njava\r\n',
+      '@echo off\r\njava %*\r\n',
     );
     const err = manager.start(
       makeServerConfig({
@@ -403,12 +458,20 @@ describe('ProcessManager', () => {
         makeServerConfig({ javaPath: '', jvmArgs: [], folderPath: tempDir }),
       );
       expect(err).toBeNull();
-      await waitFor(() => fs.existsSync(marker), 10000);
-      const childEnv = JSON.parse(fs.readFileSync(marker, 'utf8')) as {
+      let childEnv: {
         token: string | null;
         dataDir: string | null;
         path: string | null;
-      };
+      } | null = null;
+      await waitFor(() => {
+        try {
+          childEnv = JSON.parse(fs.readFileSync(marker, 'utf8')) as typeof childEnv;
+          return childEnv !== null;
+        } catch {
+          return false;
+        }
+      }, 10_000);
+      if (!childEnv) throw new Error('Child environment marker was not readable');
       expect(childEnv.token).toBeNull();
       expect(childEnv.dataDir).toBeNull();
       expect(childEnv.path).toBeTruthy();
@@ -475,10 +538,54 @@ describe('ProcessManager', () => {
     expect(status.pid).toBeTypeOf('number');
     expect(Array.isArray(status.logs)).toBe(true);
     expect(status.address).toBe('127.0.0.1:25565');
-    expect(status.stats).toMatchObject({ cpuPercent: 0, memoryMb: 0, playerCount: null });
+    expect(status.stats).toMatchObject({
+      cpuPercent: null, memoryMb: null, processIds: [], sampledAt: null, isStale: false, playerCount: null,
+    });
     // Stop it so teardown can remove the temp dir.
     manager.stop();
     await waitFor(() => manager.runningServerId === null, 5000);
+  });
+
+  it('marks a failed metric sample stale and recovers on the next interval', async () => {
+    vi.useFakeTimers();
+    try {
+      writeFakeServer();
+      const fake = createFakeChildProcess();
+      Object.assign(fake.child, { pid: 4321 });
+      const samples: Array<{ isStale: boolean; memoryMb: number | null }> = [];
+      const sampler = {
+        reset: vi.fn(),
+        sample: vi.fn()
+          .mockRejectedValueOnce(new Error('temporary CIM failure'))
+          .mockResolvedValueOnce({
+            pids: [4321, 5432],
+            cpuPercent: 12.5,
+            memoryMb: 768,
+            sampledAt: new Date().toISOString(),
+          }),
+      };
+      manager = new ProcessManager(
+        {
+          onState: () => undefined,
+          onLog: () => undefined,
+          onStats: (_serverId, stats) => samples.push({ isStale: stats.isStale, memoryMb: stats.memoryMb }),
+        },
+        () => fake.child,
+        sampler,
+      );
+
+      expect(manager.start(makeServerConfig())).toBeNull();
+      await vi.runAllTicks();
+      await Promise.resolve();
+      expect(samples.at(-1)).toEqual({ isStale: true, memoryMb: null });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(samples.at(-1)).toEqual({ isStale: false, memoryMb: 768 });
+      expect(manager.getStatus('test-server').stats.processIds).toEqual([4321, 5432]);
+      fake.child.emit('close', 0, null);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('seeds playerCount to 0 when the server comes online so deltas work', async () => {

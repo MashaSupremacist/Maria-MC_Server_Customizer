@@ -27,12 +27,16 @@ export default function DashboardStats({
         </span>
       </div>
       <div className="stat-tile">
-        <span className="stat-label">CPU</span>
-        <span className="stat-value">{stats.cpuPercent.toFixed(1)}%</span>
+        <span className="stat-label">CPU{stats.isStale ? ' (stale)' : ''}</span>
+        <span className="stat-value">
+          {stats.cpuPercent === null ? '—' : `${stats.cpuPercent.toFixed(1)}%`}
+        </span>
       </div>
       <div className="stat-tile">
-        <span className="stat-label">Memory</span>
-        <span className="stat-value">{stats.memoryMb.toFixed(1)} MB</span>
+        <span className="stat-label">Memory{stats.isStale ? ' (stale)' : ''}</span>
+        <span className="stat-value">
+          {stats.memoryMb === null ? '—' : `${stats.memoryMb.toFixed(1)} MB`}
+        </span>
       </div>
       <div className="stat-tile">
         <span className="stat-label">Uptime</span>

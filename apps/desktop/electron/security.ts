@@ -3,6 +3,19 @@ export interface TrustedRendererPolicy {
   developmentOrigin: string | null;
 }
 
+export interface IpcFrameIdentity {
+  /** True only when Electron reports the app's one managed BrowserWindow. */
+  senderMatchesMainWindow: boolean;
+  /** Sender process/frame identifiers supplied by Electron's IPC event. */
+  senderProcessId: number;
+  senderFrameId: number;
+  /** Identifiers of the current main frame of the managed BrowserWindow. */
+  mainProcessId: number;
+  mainFrameId: number;
+  /** A detached WebFrameMain must never retain IPC authority. */
+  senderFrameDetached: boolean;
+}
+
 /** Build the exact URL policy used by navigation and privileged IPC. */
 export function createTrustedRendererPolicy(
   productionFileUrl: string,
@@ -66,6 +79,24 @@ export function assertTrustedRendererUrl(
   if (!isTrustedRendererUrl(value, policy)) {
     throw new Error('Blocked privileged IPC from an untrusted renderer');
   }
+}
+
+/**
+ * Privileged IPC belongs only to the current top-level frame of the app's
+ * managed BrowserWindow. This is deliberately identity-based rather than an
+ * exact file URL comparison: a Portable Electron app is extracted to a
+ * generated path that may be normalized differently by Chromium.
+ *
+ * Navigation remains guarded by `isTrustedRendererUrl`, so this does not
+ * grant authority to a navigated remote page or a child frame.
+ */
+export function isTrustedMainFrameIpcSender(identity: IpcFrameIdentity): boolean {
+  return (
+    identity.senderMatchesMainWindow &&
+    !identity.senderFrameDetached &&
+    identity.senderProcessId === identity.mainProcessId &&
+    identity.senderFrameId === identity.mainFrameId
+  );
 }
 
 const ALLOWED_EXTERNAL_ORIGINS = new Set([

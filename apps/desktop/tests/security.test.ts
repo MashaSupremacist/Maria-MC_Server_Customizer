@@ -3,6 +3,7 @@ import {
   assertTrustedRendererUrl,
   createTrustedRendererPolicy,
   isAllowedExternalUrl,
+  isTrustedMainFrameIpcSender,
   isTrustedRendererUrl,
 } from '../electron/security';
 
@@ -53,5 +54,29 @@ describe('external URL policy', () => {
     'file:///C:/Windows/System32/calc.exe',
   ])('denies %s', (url) => {
     expect(isAllowedExternalUrl(url)).toBe(false);
+  });
+});
+
+describe('privileged IPC frame identity', () => {
+  const currentFrame = {
+    senderMatchesMainWindow: true,
+    senderProcessId: 10,
+    senderFrameId: 20,
+    mainProcessId: 10,
+    mainFrameId: 20,
+    senderFrameDetached: false,
+  };
+
+  it('accepts the managed window main frame even when file URL normalization differs', () => {
+    expect(isTrustedMainFrameIpcSender(currentFrame)).toBe(true);
+  });
+
+  it.each([
+    { senderMatchesMainWindow: false },
+    { senderProcessId: 11 },
+    { senderFrameId: 21 },
+    { senderFrameDetached: true },
+  ])('rejects an untrusted frame identity %#', (override) => {
+    expect(isTrustedMainFrameIpcSender({ ...currentFrame, ...override })).toBe(false);
   });
 });

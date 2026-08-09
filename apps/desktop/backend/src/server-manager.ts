@@ -8,10 +8,10 @@ import type {
 import type { DatabaseResult } from './db';
 import {
   findBatchLauncher,
-  findServerJar,
   ProcessManager,
   type ServerConfig,
 } from './process-manager';
+import { resolveModernForgeLaunch } from './headless-launcher';
 import {
   ServerOperationConflictError,
   ServerOperationCoordinator,
@@ -100,12 +100,15 @@ export class ServerManagerService {
     if (!record) {
       return { code: 'not-found', message: `No server record with id ${serverId}` };
     }
-    // A batch-launcher server (start.bat / run.bat) owns its own java
-    // invocation — the script decides the JVM, not the app. Skip Java
-    // resolution and validation entirely for those folders.
+    // Generic batch launchers own their own Java invocation. Forge's standard
+    // response-file launcher is different: ProcessManager runs its Java
+    // command directly so it stays headless and observable.
     const isBatchLauncher =
       record.edition !== 'bedrock' && findBatchLauncher(record.folderPath) !== null;
-    if (record.edition !== 'bedrock' && !isBatchLauncher) {
+    const modernForgeLaunch =
+      record.edition !== 'bedrock' && resolveModernForgeLaunch(record.folderPath) !== null;
+    const requiresManagedJava = record.edition !== 'bedrock' && (!isBatchLauncher || modernForgeLaunch);
+    if (requiresManagedJava) {
       if (!record.javaPath) {
         if (this.resolveJavaPath) {
           const resolved = await this.resolveJavaPath(record.version);
@@ -130,9 +133,10 @@ export class ServerManagerService {
       };
     }
 
-    // Validate Java compatibility before launching (Bedrock needs no Java,
-    // and batch-launcher folders run their own script).
-    if (record.edition !== 'bedrock' && !isBatchLauncher && this.validateJava) {
+    // Validate Java compatibility before launching. Generic batch launchers
+    // retain their own runtime contract; direct and Forge response-file
+    // launches use the app-managed runtime.
+    if (requiresManagedJava && this.validateJava) {
       const validationError = await this.validateJava(record.version, record.javaPath as string);
       if (validationError) return validationError;
     }
@@ -141,13 +145,13 @@ export class ServerManagerService {
       serverId: record.id,
       name: record.name,
       folderPath: record.folderPath,
-      // Bedrock needs no java. For batch launchers the configured java is
+      // Bedrock needs no java. For generic batch launchers the configured java is
       // passed through so ProcessManager can put it on the child's PATH
       // (the launcher calls bare `java`); empty string means "rely on PATH".
       javaPath:
         record.edition === 'bedrock'
           ? ''
-          : isBatchLauncher
+          : isBatchLauncher && !modernForgeLaunch
             ? (record.javaPath ?? '')
             : (record.javaPath as string),
       memoryMb: record.memoryMb,

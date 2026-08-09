@@ -9,9 +9,9 @@ import { createBeforeQuitHandler } from './app-shutdown';
 import { BackendClient } from './backend-client';
 import { isCanonicalReleaseUrl } from './repository';
 import {
-  assertTrustedRendererUrl,
   createTrustedRendererPolicy,
   isAllowedExternalUrl,
+  isTrustedMainFrameIpcSender,
   isTrustedRendererUrl,
 } from './security';
 import { checkForUpdate } from './update-check';
@@ -74,7 +74,19 @@ const rendererPolicy = createTrustedRendererPolicy(
 );
 
 function assertTrustedIpcSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): void {
-  assertTrustedRendererUrl(event.senderFrame?.url ?? '', rendererPolicy);
+  const window = mainWindow;
+  const mainFrame = window?.webContents.mainFrame;
+  const senderFrame = event.senderFrame;
+  if (!window || window.isDestroyed() || !mainFrame || !isTrustedMainFrameIpcSender({
+    senderMatchesMainWindow: event.sender === window.webContents,
+    senderProcessId: senderFrame?.processId ?? event.processId,
+    senderFrameId: senderFrame?.routingId ?? event.frameId,
+    mainProcessId: mainFrame.processId,
+    mainFrameId: mainFrame.routingId,
+    senderFrameDetached: senderFrame?.detached ?? false,
+  })) {
+    throw new Error('Blocked privileged IPC from an untrusted renderer');
+  }
 }
 
 // All privileged invoke/send registrations below pass through this one guard.
@@ -93,7 +105,11 @@ const ipcMain = {
     listener: (event: Electron.IpcMainEvent, ...args: any[]) => void,
   ): void {
     rawIpcMain.on(channel, (event, ...args) => {
-      if (!isTrustedRendererUrl(event.senderFrame?.url ?? '', rendererPolicy)) return;
+      try {
+        assertTrustedIpcSender(event);
+      } catch {
+        return;
+      }
       listener(event, ...args);
     });
   },

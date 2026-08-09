@@ -7,7 +7,10 @@ import { installMscMock } from './test/msc-mock';
 vi.mock('./hooks/useServerRuntime', () => ({
   useServerRuntime: () => ({
     state: 'offline', pid: null, uptimeSeconds: 0, exitCode: null, logs: [], address: null,
-    stats: { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] },
+    stats: {
+      cpuPercent: null, memoryMb: null, processIds: [], sampledAt: null, isStale: false,
+      playerCount: null, onlinePlayers: [],
+    },
     error: null, startError: null, clearError: vi.fn(), start: vi.fn(), stop: vi.fn(),
     restart: vi.fn(), forceKill: vi.fn(), sendCommand: vi.fn(),
   }),

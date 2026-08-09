@@ -3,6 +3,18 @@ import type { LogLine, ServerState, ServerStats, StartServerError } from '@msc/s
 import { api } from '../lib/api';
 import { connectWebSocket } from '../lib/socket';
 
+function emptyStats(): ServerStats {
+  return {
+    cpuPercent: null,
+    memoryMb: null,
+    processIds: [],
+    sampledAt: null,
+    isStale: false,
+    playerCount: null,
+    onlinePlayers: [],
+  };
+}
+
 export interface ServerRuntime {
   state: ServerState;
   pid: number | null;
@@ -35,12 +47,7 @@ export function useServerRuntime(serverId: string | null): ServerRuntime {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [startError, setStartError] = useState<StartServerError | null>(null);
-  const [stats, setStats] = useState<ServerStats>({
-    cpuPercent: 0,
-    memoryMb: 0,
-    playerCount: null,
-    onlinePlayers: [],
-  });
+  const [stats, setStats] = useState<ServerStats>(emptyStats);
   const [address, setAddress] = useState<string | null>(null);
   const serverIdRef = useRef<string | null>(null);
   serverIdRef.current = serverId;
@@ -107,7 +114,7 @@ export function useServerRuntime(serverId: string | null): ServerRuntime {
     setPid(null);
     setUptimeSeconds(0);
     setExitCode(null);
-    setStats({ cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] });
+    setStats(emptyStats());
     setAddress(null);
     setError(null);
     setStartError(null);

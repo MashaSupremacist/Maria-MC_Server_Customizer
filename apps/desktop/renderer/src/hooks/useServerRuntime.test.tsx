@@ -29,7 +29,10 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 function status(serverId: string, state: ServerStatus['state'], pid: number): ServerStatus {
   return {
     serverId, state, pid, startedAt: null, uptimeSeconds: 5, exitCode: null,
-    logs: [], stats: { cpuPercent: 0, memoryMb: 0, playerCount: null, onlinePlayers: [] },
+    logs: [], stats: {
+      cpuPercent: null, memoryMb: null, processIds: [], sampledAt: null, isStale: false,
+      playerCount: null, onlinePlayers: [],
+    },
     address: null,
   };
 }

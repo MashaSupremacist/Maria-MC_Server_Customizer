@@ -479,10 +479,16 @@ export interface LogLine {
 
 /** Live resource usage of the running server process. */
 export interface ServerStats {
-  /** CPU percent (0-100) for the server process tree. */
-  cpuPercent: number;
-  /** Resident memory in MB. */
-  memoryMb: number;
+  /** CPU percent (0-100) for the server process tree; null until sampled. */
+  cpuPercent: number | null;
+  /** Aggregate working-set memory in MB; null until sampled. */
+  memoryMb: number | null;
+  /** Actual root/descendant PIDs contributing to this reading. */
+  processIds: number[];
+  /** When this resource sample was collected, or null before the first sample. */
+  sampledAt: string | null;
+  /** True when the last sampling attempt failed and a retry is pending. */
+  isStale: boolean;
   /** Current online player count when parseable from the log, else null. */
   playerCount: number | null;
   /** Names of players currently online, tracked from join/leave log lines. */
@@ -517,7 +523,8 @@ export interface StartServerError {
     | 'another-server-running'
     | 'server-busy'
     | 'folder-not-found'
-    | 'incompatible-java';
+    | 'incompatible-java'
+    | 'unsupported-launcher';
   message: string;
   runningServerId?: string;
   /** For incompatible-java: the Java feature version found and required. */

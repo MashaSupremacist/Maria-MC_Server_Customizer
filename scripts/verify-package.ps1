@@ -13,6 +13,20 @@ foreach ($required in @($unpacked, $backendDist, $backendModules, $bundledNode))
   if (-not (Test-Path -LiteralPath $required)) { throw "Required packaged path is missing: $required" }
 }
 
+$portableZip = Join-Path $releaseRoot "Minecraft.Server.Customizer-Portable-$expectedVersion.zip"
+if (-not (Test-Path -LiteralPath $portableZip)) { throw "Portable ZIP is missing: $portableZip" }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::OpenRead($portableZip)
+try {
+  if ($zip.Entries.Count -eq 0) { throw 'Portable ZIP contains no entries' }
+  # Windows Explorer rejects some otherwise valid archive layouts produced by
+  # bsdtar. Native Compress-Archive entries must be relative, not `./...`.
+  $invalidZipEntry = $zip.Entries | Where-Object { $_.FullName -eq './' -or $_.FullName.StartsWith('./') } | Select-Object -First 1
+  if ($invalidZipEntry) { throw "Portable ZIP has an Explorer-incompatible entry: $($invalidZipEntry.FullName)" }
+} finally {
+  $zip.Dispose()
+}
+
 $forbiddenDist = Get-ChildItem -LiteralPath $backendDist -Recurse -File | Where-Object {
   $_.FullName -match '[\\/]__tests__[\\/]' -or $_.Name -match '\.(test|spec)\.js$|\.d\.ts$|\.map$'
 }
