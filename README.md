@@ -9,20 +9,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MashaSupremacist/Minecraft-Server-Customizer/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/MashaSupremacist/Minecraft-Server-Customizer?include_prereleases&sort=semver"></a>
-  <a href="https://github.com/MashaSupremacist/Minecraft-Server-Customizer/actions/workflows/build-release.yml"><img alt="Build and release" src="https://github.com/MashaSupremacist/Minecraft-Server-Customizer/actions/workflows/build-release.yml/badge.svg"></a>
+  <a href="https://github.com/MashaSupremacist/Maria-MC_Server_Customizer/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/MashaSupremacist/Maria-MC_Server_Customizer?include_prereleases&sort=semver"></a>
+  <a href="https://github.com/MashaSupremacist/Maria-MC_Server_Customizer/actions/workflows/build-release.yml"><img alt="Build and release" src="https://github.com/MashaSupremacist/Maria-MC_Server_Customizer/actions/workflows/build-release.yml/badge.svg"></a>
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-39e66d"></a>
 </p>
 
 > [!IMPORTANT]
-> **Regular users do not need Node.js, npm, or the source code.** Download a packaged application from [GitHub Releases](https://github.com/MashaSupremacist/Minecraft-Server-Customizer/releases) and run it directly.
+> **Regular users do not need Node.js, npm, or the source code.** Download a packaged application from [GitHub Releases](https://github.com/MashaSupremacist/Maria-MC_Server_Customizer/releases) and run it directly.
 
 ## Download
 
 ### Portable EXE — recommended
 
-1. Open [Releases](https://github.com/MashaSupremacist/Minecraft-Server-Customizer/releases).
+1. Open [Releases](https://github.com/MashaSupremacist/Maria-MC_Server_Customizer/releases).
 2. Download **`Minecraft.Server.Customizer-Portable-x.y.z.exe`**.
 3. Double-click the downloaded file. No installation is required.
 
@@ -33,7 +33,7 @@ The portable executable is self-contained. Application data, servers, backups, a
 If you prefer desktop and Start Menu shortcuts, download **`Minecraft.Server.Customizer-Setup-x.y.z.exe`** instead.
 
 > [!NOTE]
-> Current builds are unsigned. Windows SmartScreen may show an **Unknown publisher** warning on first launch. Code signing is planned for a future release.
+> Current builds are unsigned. Windows SmartScreen may show an **Unknown publisher** warning on first launch.
 
 ## What it can do
 
@@ -46,8 +46,8 @@ If you prefer desktop and Start Menu shortcuts, download **`Minecraft.Server.Cus
 | Configuration | Friendly Java and Bedrock settings editors plus raw-file editing |
 | Players | Whitelist, operators, bans, Bedrock allowlist, and permission levels |
 | Worlds | Local world discovery and import |
-| Extensions | Fabric/Forge mods, Paper plugins, datapacks, behavior packs, and resource packs |
-| Safety | ZIP backups, restore, retention controls, and pre-change backups |
+| Extensions | Fabric/Forge mods, Paper plugins, and Bedrock behavior/resource packs |
+| Safety | ZIP backups, restore, automatic retention, and pre-change backups |
 | Connectivity | Playit tunnel integration |
 | Java | Detect an existing Java installation or install a private runtime without changing system `PATH` |
 
@@ -55,24 +55,33 @@ If you prefer desktop and Start Menu shortcuts, download **`Minecraft.Server.Cus
 
 - Server processes run directly on your computer.
 - The local backend binds only to `127.0.0.1` and uses a random per-launch authentication token.
-- Server data is not committed to this repository.
+- Packaged application metadata, ZIP backups, and app-managed Java runtimes are stored in the app-data directory.
+- Server folders are created in the server-library directory selected by the user and may be stored outside the Windows user profile.
 - Java runtimes installed by the app are private to Minecraft Server Customizer.
 - External links open in your normal system browser.
 
-Packaged application data is stored under:
+For packaged builds, application metadata, ZIP backups, and app-managed Java runtimes are stored under:
 
 ```text
 %APPDATA%\@msc\desktop\app-data
 ```
 
-Uninstalling the desktop application does not automatically delete that server data.
+Server folders and in-server configuration backups remain in the selected server-library directory. Uninstalling the desktop application does not automatically delete app data or server folders.
+
+## VirusTotal report
+
+The report below corresponds to the SHA-256 hash of `Minecraft.Server.Customizer-Portable-0.5.2.exe`:
+
+`39e269d3835a70b41bf19ad3e06d3d37e38fe8987e3ed6691302b343bfecc528`
+
+[View the VirusTotal report](https://www.virustotal.com/gui/file/39e269d3835a70b41bf19ad3e06d3d37e38fe8987e3ed6691302b343bfecc528?nocache=1)
 
 ## Verify a download
 
 Every GitHub Release includes `SHA256SUMS.txt`. From Git Bash, compare the published checksum with your download:
 
 ```sh
-sha256sum "Minecraft Server Customizer-Portable-0.5.0.exe"
+sha256sum "Minecraft.Server.Customizer-Portable-x.y.z.exe"
 ```
 
 ## Development
@@ -80,7 +89,7 @@ sha256sum "Minecraft Server Customizer-Portable-0.5.0.exe"
 The following requirements are for contributors only:
 
 - Windows 10/11
-- Node.js 24 (release-build version; dependencies require Node.js 22 or newer)
+- Node.js 22.12.0 or newer (the release workflow uses Node.js 24)
 - npm 10 or newer
 
 Install dependencies and launch the development build:
@@ -112,9 +121,9 @@ Output is written to `release/`:
 
 ```text
 release/
-  Minecraft Server Customizer-Setup-x.y.z.exe
-  Minecraft Server Customizer-Portable-x.y.z.exe
-  Minecraft Server Customizer-Portable-x.y.z.zip
+  Minecraft.Server.Customizer-Setup-x.y.z.exe
+  Minecraft.Server.Customizer-Portable-x.y.z.exe
+  Minecraft.Server.Customizer-Portable-x.y.z.zip
 ```
 
 ## Project layout
@@ -137,7 +146,7 @@ scripts/
 
 ## Automated releases
 
-Pushing a version tag runs the Windows release workflow. It type-checks, tests, builds, packages, computes SHA-256 checksums, and attaches the installer and portable downloads to a GitHub Release.
+Pushing a version tag runs the Windows release workflow. It type-checks, tests, builds, packages, computes SHA-256 checksums, and attaches the installer, portable executable, portable ZIP, and checksum file to a GitHub Release.
 
 ```sh
 git tag v0.5.0
