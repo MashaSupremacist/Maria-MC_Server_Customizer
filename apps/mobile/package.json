@@ -1,0 +1,32 @@
+{
+  "name": "@msc/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minecraft Server Customizer Android application shell.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cap": "cap",
+    "cap:sync": "cap sync",
+    "android:add": "cap add android",
+    "android:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@msc/shared-types": "*",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3"
+  }
+}
